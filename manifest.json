@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Salesforce 2 Perspective",
+  "name": "Salesforce Perspectives",
   "version": "1.0.0",
-  "description": "Shows the Salesforce record type, profile, app, role, and page layout for the current page.",
+  "description": "Shows the Salesforce record type, profile, role, and page layout for the current page.",
   "permissions": [
     "activeTab",
     "cookies",
@@ -19,7 +19,7 @@
     "https://*.my.site.com/*"
   ],
   "action": {
-    "default_title": "Salesforce 2 Perspective"
+    "default_title": "Salesforce Perspectives"
   },
   "background": {
     "service_worker": "src/background.js",

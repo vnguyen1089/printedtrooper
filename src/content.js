@@ -55,7 +55,7 @@
     eyebrow.className = "sf2p-eyebrow";
     eyebrow.textContent = "Salesforce";
     const title = document.createElement("h1");
-    title.textContent = "2 Perspective";
+    title.textContent = "Perspectives";
     titleGroup.append(eyebrow, title);
 
     const actions = document.createElement("div");
@@ -145,7 +145,6 @@
     fragment.append(sectionIntro("Current Salesforce perspective"));
     fragment.append(fieldCard("Record Type", context.recordType && context.recordType.name, context.recordType && detailLine(context.recordType)));
     fragment.append(fieldCard("Profile", context.user && context.user.profileName, context.user && detailLine({ id: context.user.profileId, source: context.user.source })));
-    fragment.append(fieldCard("App", context.app && context.app.name, context.app && detailLine(context.app)));
     fragment.append(fieldCard("Role", context.user && context.user.roleName, context.user && detailLine({ id: context.user.roleId, source: context.user.source })));
     fragment.append(fieldCard("Page Layout", context.pageLayout && context.pageLayout.name, context.pageLayout && detailLine(context.pageLayout)));
     fragment.append(recordSummary(context));

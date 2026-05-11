@@ -24,7 +24,7 @@ chrome.action.onClicked.addListener(async (tab) => {
       });
       await sendToggle(tab.id);
     } catch (injectionError) {
-      console.error("Salesforce 2 Perspective could not open the side panel.", injectionError);
+      console.error("Salesforce Perspectives could not open the side panel.", injectionError);
       await flashBadge("!");
     }
   }
@@ -44,7 +44,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   collectContext(tabId)
     .then((context) => sendResponse({ ok: true, context }))
     .catch((error) => {
-      console.error("Salesforce 2 Perspective collection failed.", error);
+      console.error("Salesforce Perspectives collection failed.", error);
       sendResponse({ ok: false, error: error.message || String(error) });
     });
 
@@ -120,7 +120,6 @@ async function enrichContextFromBackground(pageContext) {
       ? await attemptBackground(warnings, "Background object info", () => apiClient.fetchJson(`/services/data/v${apiVersion}/ui-api/object-info/${encodeURIComponent(parsedPage.objectApiName)}`))
       : null;
     const recordType = await resolveRecordTypeFromApi(apiClient, apiVersion, parsedPage, objectInfo, pageContext.recordType, warnings);
-    const app = await resolveAppFromApi(apiClient, apiVersion, pageContext.app, warnings);
     const pageLayout = await resolvePageLayoutFromApi(apiClient, apiVersion, parsedPage, user, recordType, pageContext.pageLayout, warnings);
 
     return {
@@ -131,7 +130,6 @@ async function enrichContextFromBackground(pageContext) {
         apiHost: apiClient.origin
       },
       user,
-      app,
       recordType,
       pageLayout,
       warnings: summarizeWarnings(warnings)
@@ -146,7 +144,6 @@ function needsBackgroundEnrichment(context) {
   const values = [
     context.recordType && context.recordType.name,
     context.user && context.user.profileName,
-    context.app && context.app.name,
     context.user && context.user.roleName,
     context.pageLayout && context.pageLayout.name
   ];
@@ -369,45 +366,6 @@ async function resolveRecordTypeFromApi(apiClient, apiVersion, parsedPage, objec
   };
 }
 
-async function resolveAppFromApi(apiClient, apiVersion, existingApp, warnings) {
-  const appKey = existingApp && (existingApp.durableId || existingApp.developerName || existingApp.id);
-  if (!appKey || existingApp && existingApp.name && existingApp.name !== "Unavailable") {
-    return existingApp;
-  }
-
-  const conditions = [
-    `DurableId = '${soqlStringForBackground(appKey)}'`,
-    `DeveloperName = '${soqlStringForBackground(appKey)}'`
-  ];
-  if (appKey.startsWith("standard__")) {
-    conditions.push(`DeveloperName = '${soqlStringForBackground(appKey.replace(/^standard__/, ""))}'`);
-  }
-  if (isSalesforceIdForBackground(appKey)) {
-    conditions.push(`Id = '${soqlStringForBackground(appKey)}'`);
-  }
-
-  const soql = [
-    "SELECT Id, DurableId, DeveloperName, Label",
-    "FROM AppDefinition",
-    `WHERE ${conditions.join(" OR ")}`,
-    "LIMIT 1"
-  ].join(" ");
-  const response = await attemptBackground(warnings, "Background Tooling AppDefinition", () => apiClient.toolingQuery(apiVersion, soql));
-  const record = response && response.records && response.records[0];
-
-  if (!record) {
-    return existingApp;
-  }
-
-  return {
-    id: record.Id || null,
-    name: record.Label || record.DeveloperName || record.DurableId,
-    developerName: record.DeveloperName || null,
-    durableId: record.DurableId || null,
-    source: "Background Tooling API AppDefinition"
-  };
-}
-
 async function resolvePageLayoutFromApi(apiClient, apiVersion, parsedPage, user, recordType, existingPageLayout, warnings) {
   if (!parsedPage.objectApiName || !user || !user.profileId) {
     return existingPageLayout;
@@ -489,7 +447,7 @@ function summarizeWarnings(warnings) {
 
   if (sessionFailures.length > 0) {
     otherWarnings.push(
-      "Lightning REST session was not API-enabled, so Salesforce 2 Perspective tried the background API-host fallback."
+      "Lightning REST session was not API-enabled, so Salesforce Perspectives tried the background API-host fallback."
     );
   }
 
@@ -563,7 +521,6 @@ async function collectSalesforcePerspectiveInPage() {
       : null;
 
     const recordType = await resolveRecordType(apiVersion, parsedPage, objectInfo);
-    const app = await resolveCurrentApp(apiVersion, parsedPage);
     const pageLayout = await resolvePageLayout(apiVersion, parsedPage, user, recordType);
 
     return {
@@ -575,7 +532,6 @@ async function collectSalesforcePerspectiveInPage() {
         apiVersion
       },
       user,
-      app,
       record: {
         id: parsedPage.recordId || null,
         objectApiName: parsedPage.objectApiName || null,
@@ -732,60 +688,6 @@ async function collectSalesforcePerspectiveInPage() {
       name: recordTypeId ? recordTypeId : "Unavailable",
       developerName: null,
       source: recordTypeId ? "RecordTypeId field" : "Record type was not available for this object"
-    };
-  }
-
-  async function resolveCurrentApp(apiVersion, parsedPage) {
-    const appKey = parsedPage.appKey || appKeyFromNavigationLinks();
-    const domName = appNameFromDom();
-
-    if (appKey) {
-      const conditions = [
-        `DurableId = '${soqlString(appKey)}'`,
-        `DeveloperName = '${soqlString(appKey)}'`
-      ];
-      if (appKey.startsWith("standard__")) {
-        conditions.push(`DeveloperName = '${soqlString(appKey.replace(/^standard__/, ""))}'`);
-      }
-      if (isSalesforceId(appKey)) {
-        conditions.push(`Id = '${soqlString(appKey)}'`);
-      }
-
-      const soql = [
-        "SELECT Id, DurableId, DeveloperName, Label",
-        "FROM AppDefinition",
-        `WHERE ${conditions.join(" OR ")}`,
-        "LIMIT 1"
-      ].join(" ");
-      const response = await attempt("Tooling AppDefinition", () => toolingQuery(apiVersion, soql));
-      const record = response && response.records && response.records[0];
-      if (record) {
-        return {
-          id: record.Id || null,
-          name: record.Label || record.DeveloperName || record.DurableId,
-          developerName: record.DeveloperName || null,
-          durableId: record.DurableId || null,
-          source: "Tooling API AppDefinition"
-        };
-      }
-    }
-
-    if (domName) {
-      return {
-        id: null,
-        name: domName,
-        developerName: null,
-        durableId: appKey || null,
-        source: "Lightning navigation DOM"
-      };
-    }
-
-    return {
-      id: null,
-      name: appKey || "Unavailable",
-      developerName: null,
-      durableId: appKey || null,
-      source: appKey ? "Lightning URL app key" : "No current app marker found"
     };
   }
 
@@ -1002,46 +904,6 @@ async function collectSalesforcePerspectiveInPage() {
 
     values.id = candidates.find((candidate) => isSalesforceId(candidate)) || null;
     return values;
-  }
-
-  function appNameFromDom() {
-    const selectors = [
-      ".slds-context-bar__app-name .slds-truncate",
-      ".slds-context-bar__app-name",
-      ".oneAppNavContainer .slds-context-bar__app-name",
-      ".oneAppNavContainer [data-aura-class='oneAppNavBar'] .slds-context-bar__label-action",
-      "one-app-nav-bar a[href*='/lightning/app/'] .slds-truncate",
-      "one-app-nav-bar a[href*='/lightning/app/']",
-      "a.slds-context-bar__label-action[href*='/lightning/app/']",
-      "[aria-label='App']",
-      "[title='App Launcher'] + *"
-    ];
-
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      const text = element && cleanText(element.textContent || element.getAttribute("title"));
-      if (text && text.toLowerCase() !== "app launcher") {
-        return text;
-      }
-    }
-
-    return null;
-  }
-
-  function appKeyFromNavigationLinks() {
-    const link = document.querySelector("a[href*='/lightning/app/']");
-    if (!link) {
-      return null;
-    }
-
-    try {
-      const url = new URL(link.href, window.location.origin);
-      const segments = url.pathname.split("/").filter(Boolean).map((segment) => safeDecode(segment));
-      const appIndex = segments.indexOf("app");
-      return appIndex >= 0 ? segments[appIndex + 1] || null : null;
-    } catch (_error) {
-      return null;
-    }
   }
 
   function idFromIdentityUrl(value) {

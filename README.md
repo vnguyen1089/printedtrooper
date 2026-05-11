@@ -1,10 +1,9 @@
-# Salesforce 2 Perspective
+# Salesforce Perspectives
 
-Salesforce 2 Perspective is a Manifest V3 Chrome extension that opens a right-side panel on Salesforce pages. The panel shows the current:
+Salesforce Perspectives is a Manifest V3 Chrome extension that opens a right-side panel on Salesforce pages. The panel shows the current:
 
 - Record type
 - Profile
-- App
 - Role
 - Page layout
 
@@ -22,10 +21,9 @@ Some Lightning UI sessions are not API-enabled and return `INVALID_SESSION_ID` f
 2. Enable **Developer mode**.
 3. Click **Load unpacked**.
 4. Select this repository folder.
-5. Open a Salesforce Lightning or Classic page and click the **Salesforce 2 Perspective** extension icon.
+5. Open a Salesforce Lightning or Classic page and click the **Salesforce Perspectives** extension icon.
 
 ## Notes
 
 - The page layout lookup uses the Tooling API `ProfileLayout` assignment when Salesforce allows it, then falls back to UI API layout metadata.
-- App detection uses the Lightning URL or navigation DOM first, then attempts to enrich that value with Tooling API `AppDefinition`.
 - If your Salesforce permissions block a metadata endpoint, the panel still displays the values it can read and lists the blocked endpoint under collapsed **Diagnostics**.
