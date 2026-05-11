@@ -11,7 +11,7 @@ The content script scans Salesforce grids, list tables, and report result tables
 - a row-level Salesforce record ID
 - a column label, field key, or header text
 
-When you edit a cell, the background service worker executes a small API bridge in the Salesforce page context with `chrome.scripting.executeScript` and `world: "MAIN"`. That bridge:
+When you edit a cell, the background service worker calls Salesforce REST from the extension context. It resolves the active Salesforce API host from the current tab and Salesforce `sid` cookie so Lightning/console pages do not accidentally call `/services/data` on the wrong host. The API bridge:
 
 1. reads the latest Salesforce REST API version
 2. resolves the record's object from the page, row link, or record ID prefix
@@ -34,4 +34,4 @@ Click the extension icon to toggle the inline-edit layer on or off for the curre
 - Salesforce permissions, field-level security, validation rules, required fields, formulas, rollups, and record locks still apply. If Salesforce rejects an update, the extension shows the API error.
 - Report rows must expose a concrete record link or row record ID. Summary, subtotal, grand total, bucket, joined-report, and calculated report cells may not be editable because they do not map to one updateable field on one record.
 - Related-object report columns are resolved from the row/cell record context that Salesforce exposes in the DOM. If Salesforce does not expose enough context, the extension refuses to save rather than guessing.
-- The extension does not store Salesforce data or credentials. Requests use the active Salesforce session in the open tab.
+- The extension requests Chrome cookie access only to send the active Salesforce `sid` session to Salesforce REST. It does not store Salesforce data or credentials.

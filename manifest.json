@@ -5,6 +5,7 @@
   "description": "Adds inline editing to Salesforce Lightning list views and report detail rows.",
   "permissions": [
     "activeTab",
+    "cookies",
     "scripting",
     "tabs"
   ],
