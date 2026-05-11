@@ -6,6 +6,7 @@ const SALESFORCE_HOST_SUFFIXES = [
   ".salesforce-sites.com",
   ".my.site.com"
 ];
+const REPORT_DESCRIBE_CACHE = new Map();
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id || !isSalesforceUrl(tab.url)) {
@@ -15,7 +16,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 
   try {
     await sendToggle(tab.id);
-  } catch (error) {
+  } catch (_error) {
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -23,14 +24,14 @@ chrome.action.onClicked.addListener(async (tab) => {
       });
       await sendToggle(tab.id);
     } catch (injectionError) {
-      console.error("Salesforce 2 Perspective could not open the side panel.", injectionError);
+      console.error("Salesforce Inline Editor could not start.", injectionError);
       await flashBadge("!");
     }
   }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== "SF2P_COLLECT_CONTEXT") {
+  if (!message || message.type !== "SFIE_API_REQUEST") {
     return false;
   }
 
@@ -40,10 +41,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  collectContext(tabId)
-    .then((context) => sendResponse({ ok: true, context }))
+  handleSalesforceApiRequest(message.payload, sender.tab.url)
+    .then((result) => sendResponse(result))
     .catch((error) => {
-      console.error("Salesforce 2 Perspective collection failed.", error);
+      console.error("Salesforce Inline Editor request failed.", error);
       sendResponse({ ok: false, error: error.message || String(error) });
     });
 
@@ -65,7 +66,7 @@ function isSalesforceUrl(url) {
 }
 
 async function sendToggle(tabId) {
-  await chrome.tabs.sendMessage(tabId, { type: "SF2P_TOGGLE_PANEL" });
+  await chrome.tabs.sendMessage(tabId, { type: "SFIE_TOGGLE" });
 }
 
 async function flashBadge(text) {
@@ -76,539 +77,771 @@ async function flashBadge(text) {
   }, 2000);
 }
 
-async function collectContext(tabId) {
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: collectSalesforcePerspectiveInPage
-  });
-
-  if (!result || !result.result) {
-    throw new Error("Salesforce did not return any page context.");
-  }
-
-  if (!result.result.ok) {
-    throw new Error(result.result.error || "Salesforce page context collection failed.");
-  }
-
-  return result.result;
-}
-
-async function collectSalesforcePerspectiveInPage() {
+async function handleSalesforceApiRequest(payload, pageUrl) {
   const warnings = [];
-  const generatedAt = new Date().toISOString();
 
   try {
-    const parsedPage = parseSalesforcePage();
-    const apiVersion = await getLatestApiVersion();
-    let user = await getCurrentUser(apiVersion);
-
-    if (!parsedPage.objectApiName && parsedPage.recordId) {
-      const objectFromPrefix = await resolveObjectFromRecordPrefix(apiVersion, parsedPage.recordId);
-      if (objectFromPrefix) {
-        parsedPage.objectApiName = objectFromPrefix;
-      }
+    if (!payload || !payload.action) {
+      throw new Error("No Salesforce Inline Editor action was provided.");
     }
 
-    const objectInfo = parsedPage.objectApiName
-      ? await attempt("Object info", () => apiFetch(`/services/data/v${apiVersion}/ui-api/object-info/${encodeURIComponent(parsedPage.objectApiName)}`))
-      : null;
+    const api = await createSalesforceApiClient(pageUrl, warnings);
 
-    const recordType = await resolveRecordType(apiVersion, parsedPage, objectInfo);
-    const app = await resolveCurrentApp(apiVersion, parsedPage);
-    const pageLayout = await resolvePageLayout(apiVersion, parsedPage, user, recordType);
+    if (payload.action === "resolveField") {
+      const resolved = await resolveField(api, payload.context || {}, warnings);
+      return {
+        ok: true,
+        apiVersion: api.version,
+        apiHost: api.origin,
+        result: resolved,
+        warnings
+      };
+    }
 
-    return {
-      ok: true,
-      generatedAt,
-      currentUrl: window.location.href,
-      org: {
-        host: window.location.host,
-        apiVersion
-      },
-      user,
-      app,
-      record: {
-        id: parsedPage.recordId || null,
-        objectApiName: parsedPage.objectApiName || null,
-        pageType: parsedPage.pageType || "unknown"
-      },
-      recordType,
-      pageLayout,
-      warnings
-    };
+    if (payload.action === "updateField") {
+      const resolved = await resolveField(api, payload.context || {}, warnings);
+      const parsedValue = parseFieldValue(payload.value, resolved.field);
+
+      await api.fetchJson(`/services/data/v${api.version}/sobjects/${encodeURIComponent(resolved.objectApiName)}/${encodeURIComponent(resolved.recordId)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          [resolved.field.name]: parsedValue
+        })
+      });
+
+      return {
+        ok: true,
+        apiVersion: api.version,
+        apiHost: api.origin,
+        result: {
+          ...resolved,
+          savedValue: parsedValue
+        },
+        warnings
+      };
+    }
+
+    throw new Error(`Unsupported Salesforce Inline Editor action: ${payload.action}`);
   } catch (error) {
     return {
       ok: false,
       error: error.message || String(error),
-      generatedAt,
-      currentUrl: window.location.href,
       warnings
     };
   }
+}
 
-  async function getLatestApiVersion() {
-    const versions = await attempt("API versions", () => apiFetch("/services/data/"));
-    if (!Array.isArray(versions) || versions.length === 0) {
-      warnings.push("Could not read /services/data/. Falling back to API v60.0.");
-      return "60.0";
+async function createSalesforceApiClient(pageUrl, warnings) {
+  const origins = await candidateApiOrigins(pageUrl);
+  const failures = [];
+
+  for (const origin of origins) {
+    try {
+      const versions = await fetchJsonFromOrigin(origin, "/services/data/");
+      if (!Array.isArray(versions) || versions.length === 0) {
+        failures.push(`${origin}: /services/data/ returned no versions`);
+        continue;
+      }
+
+      const version = versions
+        .map((entry) => entry.version)
+        .filter(Boolean)
+        .sort((left, right) => Number.parseFloat(right) - Number.parseFloat(left))[0] || "60.0";
+
+      const sessionIds = await candidateSessionIds(origin, pageUrl);
+      let authenticatedSessionId = null;
+      let authenticated = false;
+
+      for (const sessionId of sessionIds) {
+        try {
+          await verifyAuthenticatedRest(origin, version, sessionId);
+          authenticatedSessionId = sessionId;
+          authenticated = true;
+          break;
+        } catch (error) {
+          failures.push(`${origin}: authenticated probe failed${sessionId ? "" : " without bearer token"}: ${error.message || String(error)}`);
+        }
+      }
+
+      if (!authenticated) {
+        continue;
+      }
+
+      if (failures.length) {
+        warnings.push(`Skipped API hosts: ${failures.join("; ")}`);
+      }
+
+      return {
+        origin,
+        version,
+        fetchJson: (path, options = {}) => fetchJsonFromOrigin(origin, path, {
+          ...options,
+          sessionId: authenticatedSessionId
+        })
+      };
+    } catch (error) {
+      failures.push(`${origin}: ${error.message || String(error)}`);
     }
-
-    const latest = versions
-      .map((version) => version.version)
-      .filter(Boolean)
-      .sort((left, right) => Number.parseFloat(right) - Number.parseFloat(left))[0];
-
-    return latest || "60.0";
   }
 
-  async function getCurrentUser(apiVersion) {
-    const pageUserId = getUserIdFromPageGlobals();
-    const userInfo = await attempt("OAuth user info", () => apiFetch("/services/oauth2/userinfo"));
-    const userId = pageUserId || userInfo && (userInfo.user_id || userInfo.userId || idFromIdentityUrl(userInfo.sub));
+  throw new Error([
+    "Salesforce REST rejected the current browser session.",
+    "Reload Salesforce and try again.",
+    "If this keeps happening, make sure your Salesforce user has API access enabled.",
+    failures.length ? `Details: ${failures.join("; ")}` : ""
+  ].filter(Boolean).join(" "));
+}
 
-    if (!userId || !isSalesforceId(userId)) {
-      return {
-        id: userId || null,
-        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
-        profileId: null,
-        profileName: "Unavailable",
-        roleId: null,
-        roleName: "Unavailable",
-        source: "OAuth userinfo; SOQL user lookup unavailable"
-      };
+async function verifyAuthenticatedRest(origin, version, sessionId) {
+  await fetchJsonFromOrigin(origin, `/services/data/v${version}/limits`, { sessionId });
+}
+
+async function candidateSessionIds(origin, pageUrl) {
+  const pageHost = hostFromUrl(pageUrl);
+  const originCookie = await sessionIdForOrigin(origin);
+  const cookies = await chrome.cookies.getAll({ name: "sid" });
+  const cookieValues = cookies
+    .filter((cookie) => isSalesforceCookieDomain((cookie.domain || "").replace(/^\./, "").toLowerCase()))
+    .sort((left, right) => {
+      const leftDomain = (left.domain || "").replace(/^\./, "").toLowerCase();
+      const rightDomain = (right.domain || "").replace(/^\./, "").toLowerCase();
+      return hostScore(rightDomain, pageHost) - hostScore(leftDomain, pageHost);
+    })
+    .map((cookie) => cookie.value)
+    .filter(Boolean);
+
+  return uniqueValues([
+    originCookie,
+    ...cookieValues,
+    ""
+  ]);
+}
+
+async function candidateApiOrigins(pageUrl) {
+  const fromUrl = candidateOriginsFromUrl(pageUrl);
+  const fromCookies = await candidateOriginsFromCookies(pageUrl);
+  return uniqueOrigins([...fromUrl, ...fromCookies]);
+}
+
+function candidateOriginsFromUrl(pageUrl) {
+  const origins = [];
+
+  try {
+    const url = new URL(pageUrl);
+    const hostname = url.hostname.toLowerCase();
+    origins.push(...apiHostsForPageHost(hostname).map((host) => `https://${host}`));
+  } catch (_error) {
+    // Ignore malformed tab URLs. Cookie-derived candidates may still work.
+  }
+
+  return origins;
+}
+
+async function candidateOriginsFromCookies(pageUrl) {
+  const pageHost = hostFromUrl(pageUrl);
+  const cookies = await chrome.cookies.getAll({ name: "sid" });
+  const salesforceCookieHosts = cookies
+    .map((cookie) => (cookie.domain || "").replace(/^\./, "").toLowerCase())
+    .filter((domain) => isSalesforceCookieDomain(domain));
+
+  return salesforceCookieHosts
+    .sort((left, right) => hostScore(right, pageHost) - hostScore(left, pageHost))
+    .flatMap((host) => apiHostsForPageHost(host))
+    .map((host) => `https://${host}`);
+}
+
+function apiHostsForPageHost(hostname) {
+  if (!hostname) {
+    return [];
+  }
+
+  if (hostname.endsWith(".lightning.force.com")) {
+    return [
+      hostname.replace(/\.lightning\.force\.com$/, ".my.salesforce.com"),
+      hostname.replace(/\.lightning\.force\.com$/, ".salesforce.com"),
+      hostname
+    ];
+  }
+
+  if (hostname.endsWith(".visualforce.com")) {
+    return [
+      hostname.replace(/\.visualforce\.com$/, ".my.salesforce.com"),
+      hostname
+    ];
+  }
+
+  if (hostname.endsWith(".my.site.com")) {
+    return [
+      hostname.replace(/\.my\.site\.com$/, ".my.salesforce.com"),
+      hostname
+    ];
+  }
+
+  return [hostname];
+}
+
+function isSalesforceCookieDomain(domain) {
+  return Boolean(domain) && [
+    "salesforce.com",
+    "force.com",
+    "visualforce.com",
+    "salesforce-sites.com",
+    "my.site.com"
+  ].some((suffix) => domain === suffix || domain.endsWith(`.${suffix}`));
+}
+
+function hostScore(host, pageHost) {
+  if (!pageHost) {
+    return host.endsWith(".salesforce.com") ? 20 : 0;
+  }
+
+  const pagePrefix = pageHost
+    .replace(/\.lightning\.force\.com$/, "")
+    .replace(/\.my\.salesforce\.com$/, "")
+    .replace(/\.salesforce\.com$/, "")
+    .replace(/\.visualforce\.com$/, "");
+
+  let score = 0;
+  if (host === pageHost) {
+    score += 100;
+  }
+  if (pagePrefix && host.includes(pagePrefix)) {
+    score += 80;
+  }
+  if (host.endsWith(".my.salesforce.com")) {
+    score += 40;
+  } else if (host.endsWith(".salesforce.com")) {
+    score += 30;
+  } else if (host.endsWith(".lightning.force.com")) {
+    score += 10;
+  }
+
+  return score;
+}
+
+function hostFromUrl(pageUrl) {
+  try {
+    return new URL(pageUrl).hostname.toLowerCase();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function uniqueOrigins(origins) {
+  const seen = new Set();
+  const unique = [];
+
+  for (const origin of origins) {
+    if (!origin || seen.has(origin)) {
+      continue;
+    }
+    seen.add(origin);
+    unique.push(origin);
+  }
+
+  return unique;
+}
+
+function uniqueValues(values) {
+  const seen = new Set();
+  const unique = [];
+
+  for (const value of values) {
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    unique.push(value);
+  }
+
+  return unique;
+}
+
+async function sessionIdForOrigin(origin) {
+  try {
+    const cookie = await chrome.cookies.get({ url: origin, name: "sid" });
+    return cookie && cookie.value || "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+async function fetchJsonFromOrigin(origin, path, options = {}) {
+  const url = new URL(path, origin).toString();
+  const headers = {
+    "Accept": "application/json",
+    ...options.headers
+  };
+
+  if (options.sessionId) {
+    headers.Authorization = `Bearer ${options.sessionId}`;
+  }
+
+  const response = await fetch(url, {
+    method: options.method || "GET",
+    credentials: "include",
+    headers,
+    body: options.body
+  });
+
+  const text = await response.text();
+  let body = null;
+
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch (_error) {
+      body = text;
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(`${path} returned ${response.status}: ${salesforceErrorMessage(body)}`);
+  }
+
+  return body;
+}
+
+async function resolveField(api, context, warnings) {
+  const recordId = normalizeId(context.recordId);
+  if (!recordId) {
+    throw new Error("This row does not expose a Salesforce record ID.");
+  }
+
+  const reportColumnContext = context.reportId
+    ? await resolveReportColumnContext(api, context, warnings)
+    : null;
+  const enrichedContext = {
+    ...context,
+    ...(reportColumnContext || {})
+  };
+
+  let objectApiName = context.objectApiName;
+  if (isNonEditableObject(objectApiName)) {
+    objectApiName = null;
+  }
+  objectApiName = objectApiName || await resolveObjectFromRecordPrefix(api, recordId, warnings);
+  if (!objectApiName) {
+    throw new Error(`Could not resolve the object type for record ${recordId}.`);
+  }
+
+  const describe = await api.fetchJson(`/services/data/v${api.version}/sobjects/${encodeURIComponent(objectApiName)}/describe`);
+  const field = findField(describe.fields || [], enrichedContext);
+  if (!field) {
+    throw new Error(fieldNotFoundMessage(objectApiName, enrichedContext, describe.fields || []));
+  }
+
+  if (!field.updateable) {
+    throw new Error(`${field.label || field.name} (${field.name}) is not updateable for ${objectApiName}.`);
+  }
+
+  if (field.calculated || field.autoNumber) {
+    throw new Error(`${field.label || field.name} (${field.name}) is calculated or auto-numbered and cannot be edited.`);
+  }
+
+  return {
+    recordId,
+    objectApiName,
+    field: {
+      name: field.name,
+      label: field.label || field.name,
+      type: field.type,
+      updateable: Boolean(field.updateable),
+      nillable: Boolean(field.nillable),
+      length: field.length || null,
+      picklistValues: Array.isArray(field.picklistValues)
+        ? field.picklistValues
+            .filter((entry) => entry && entry.active !== false)
+            .map((entry) => ({
+              label: entry.label || entry.value,
+              value: entry.value
+            }))
+        : []
+    }
+  };
+}
+
+async function resolveReportColumnContext(api, context, warnings) {
+  try {
+    const reportId = normalizeId(context.reportId);
+    if (!reportId) {
+      return null;
     }
 
-    const soql = [
-      "SELECT Id, Name, ProfileId, Profile.Name, UserRoleId, UserRole.Name",
-      "FROM User",
-      `WHERE Id = '${soqlString(userId)}'`,
-      "LIMIT 1"
-    ].join(" ");
-    const response = await attempt("User profile and role", () => query(apiVersion, soql));
-    const record = response && response.records && response.records[0];
-
-    if (!record) {
-      return {
-        id: userId,
-        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
-        profileId: null,
-        profileName: "Unavailable",
-        roleId: null,
-        roleName: "Unavailable",
-        source: "Current user id; SOQL user lookup returned no rows"
-      };
+    const reportDescribe = await getReportDescribe(api, reportId);
+    const columns = collectReportColumns(reportDescribe);
+    const column = findReportColumn(columns, context);
+    if (!column) {
+      warnings.push(`Report ${reportId}: could not match report column "${context.headerText || context.columnLabel || context.fieldKey || "unknown"}" to report metadata.`);
+      return null;
     }
 
     return {
-      id: record.Id,
-      name: record.Name,
-      profileId: record.ProfileId || null,
-      profileName: record.Profile && record.Profile.Name || "Unavailable",
-      roleId: record.UserRoleId || null,
-      roleName: record.UserRole && record.UserRole.Name || "No role assigned",
-      source: "REST SOQL User query"
+      reportColumnKey: column.key,
+      reportColumnLabel: column.label,
+      fieldApiName: column.fieldName,
+      fieldKey: column.key,
+      columnLabel: column.label || context.columnLabel,
+      headerText: column.label || context.headerText
     };
+  } catch (error) {
+    warnings.push(`Report metadata: ${error.message || String(error)}`);
+    return null;
+  }
+}
+
+async function getReportDescribe(api, reportId) {
+  const cacheKey = `${api.origin}|${api.version}|${reportId}`;
+  if (!REPORT_DESCRIBE_CACHE.has(cacheKey)) {
+    REPORT_DESCRIBE_CACHE.set(
+      cacheKey,
+      api.fetchJson(`/services/data/v${api.version}/analytics/reports/${encodeURIComponent(reportId)}/describe`)
+    );
+  }
+  return REPORT_DESCRIBE_CACHE.get(cacheKey);
+}
+
+function collectReportColumns(reportDescribe) {
+  const columns = new Map();
+  const detailColumns = reportDescribe
+    && reportDescribe.reportMetadata
+    && Array.isArray(reportDescribe.reportMetadata.detailColumns)
+    ? reportDescribe.reportMetadata.detailColumns
+    : [];
+
+  detailColumns.forEach((key, index) => addReportColumn(columns, key, { index }));
+
+  const extendedDetailInfo = reportDescribe
+    && reportDescribe.reportExtendedMetadata
+    && reportDescribe.reportExtendedMetadata.detailColumnInfo;
+  addReportColumnMap(columns, extendedDetailInfo);
+
+  const categories = reportDescribe
+    && reportDescribe.reportTypeMetadata
+    && reportDescribe.reportTypeMetadata.categories;
+  for (const category of objectValues(categories)) {
+    addReportColumnMap(columns, category && category.columns);
   }
 
-  async function resolveObjectFromRecordPrefix(apiVersion, recordId) {
+  return Array.from(columns.values());
+}
+
+function addReportColumnMap(columns, columnMap) {
+  if (!columnMap) {
+    return;
+  }
+
+  if (Array.isArray(columnMap)) {
+    for (const entry of columnMap) {
+      addReportColumn(columns, entry && (entry.name || entry.columnName || entry.key), entry);
+    }
+    return;
+  }
+
+  for (const [key, value] of Object.entries(columnMap)) {
+    addReportColumn(columns, key, value);
+  }
+}
+
+function addReportColumn(columns, key, info = {}) {
+  if (!key) {
+    return;
+  }
+
+  const existing = columns.get(key) || { key };
+  const merged = {
+    ...existing,
+    ...info,
+    key,
+    label: info.label || info.displayName || existing.label || key,
+    fieldName: reportFieldName(key, info) || existing.fieldName
+  };
+  columns.set(key, merged);
+}
+
+function findReportColumn(columns, context) {
+  const directValues = [
+    context.fieldApiName,
+    context.fieldKey,
+    context.reportColumnKey
+  ].map(cleanColumnLabel).filter(Boolean);
+
+  for (const value of directValues) {
+    const match = columns.find((column) => lower(column.key) === lower(value) || lower(column.fieldName) === lower(value));
+    if (match) {
+      return match;
+    }
+  }
+
+  const labels = [
+    context.columnLabel,
+    context.headerText,
+    context.ariaLabel,
+    context.reportColumnLabel
+  ].map(cleanColumnLabel).filter(Boolean);
+
+  for (const label of labels) {
+    const match = columns.find((column) => lower(column.label) === lower(label));
+    if (match) {
+      return match;
+    }
+  }
+
+  const normalized = [...directValues, ...labels].map(normalizeLabel).filter(Boolean);
+  for (const value of normalized) {
+    const match = columns.find((column) => {
+      return normalizeLabel(column.label) === value
+        || normalizeLabel(column.key) === value
+        || normalizeLabel(column.fieldName) === value;
+    });
+    if (match) {
+      return match;
+    }
+  }
+
+  const indexCandidates = [
+    numberOrNull(context.columnIndex),
+    numberOrNull(context.ariaColIndex) == null ? null : numberOrNull(context.ariaColIndex) - 1
+  ].filter((value) => value != null && value >= 0);
+  for (const index of indexCandidates) {
+    const match = columns.find((column) => column.index === index);
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+function reportFieldName(key, info = {}) {
+  const values = [
+    info.fieldApiName,
+    info.entityColumnName,
+    info.columnName,
+    info.name,
+    key
+  ];
+
+  for (const value of values) {
+    const cleaned = cleanColumnLabel(value);
+    if (!cleaned) {
+      continue;
+    }
+
+    const parts = cleaned.split(/[.:]/).map((part) => cleanColumnLabel(part)).filter(Boolean);
+    return parts[parts.length - 1] || cleaned;
+  }
+
+  return "";
+}
+
+async function resolveObjectFromRecordPrefix(api, recordId, warnings) {
+  try {
     const prefix = recordId.slice(0, 3);
-    const describe = await attempt("Global object describe", () => apiFetch(`/services/data/v${apiVersion}/sobjects/`));
+    const describe = await api.fetchJson(`/services/data/v${api.version}/sobjects/`);
     const match = describe && Array.isArray(describe.sobjects)
       ? describe.sobjects.find((object) => object.keyPrefix === prefix)
       : null;
     return match && match.name || null;
+  } catch (error) {
+    warnings.push(`Global object describe: ${error.message || String(error)}`);
+    return null;
   }
+}
 
-  async function resolveRecordType(apiVersion, parsedPage, objectInfo) {
-    if (!parsedPage.recordId || !parsedPage.objectApiName) {
-      return {
-        id: null,
-        name: "Not on a record page",
-        developerName: null,
-        source: "URL context"
-      };
-    }
+function findField(fields, context) {
+  const candidates = candidateNames(context);
+  const updateableFields = fields.filter((field) => field && field.updateable);
+  const allFields = updateableFields.length ? updateableFields : fields;
 
-    let recordTypeId = null;
-    const fields = encodeURIComponent(`${parsedPage.objectApiName}.RecordTypeId`);
-    const uiRecord = await attempt(
-      "UI API record type field",
-      () => apiFetch(`/services/data/v${apiVersion}/ui-api/records/${encodeURIComponent(parsedPage.recordId)}?fields=${fields}`)
-    );
-
-    if (uiRecord && uiRecord.fields && uiRecord.fields.RecordTypeId) {
-      recordTypeId = uiRecord.fields.RecordTypeId.value || null;
-    }
-
-    if (!recordTypeId && isSafeObjectApiName(parsedPage.objectApiName)) {
-      const soql = [
-        "SELECT RecordTypeId",
-        `FROM ${parsedPage.objectApiName}`,
-        `WHERE Id = '${soqlString(parsedPage.recordId)}'`,
-        "LIMIT 1"
-      ].join(" ");
-      const response = await attempt("Record type SOQL fallback", () => query(apiVersion, soql));
-      const record = response && response.records && response.records[0];
-      recordTypeId = record && record.RecordTypeId || null;
-    }
-
-    if (recordTypeId && objectInfo && objectInfo.recordTypeInfos && objectInfo.recordTypeInfos[recordTypeId]) {
-      const recordTypeInfo = objectInfo.recordTypeInfos[recordTypeId];
-      return {
-        id: recordTypeId,
-        name: recordTypeInfo.name || recordTypeInfo.developerName || recordTypeId,
-        developerName: recordTypeInfo.developerName || null,
-        source: "UI API object info"
-      };
-    }
-
-    if (!recordTypeId && objectInfo && objectInfo.recordTypeInfos) {
-      const recordTypes = Object.values(objectInfo.recordTypeInfos);
-      const master = recordTypes.find((recordTypeInfo) => recordTypeInfo.master);
-      if (master) {
-        return {
-          id: master.recordTypeId || null,
-          name: master.name || "Master",
-          developerName: master.developerName || "Master",
-          source: "UI API object info"
-        };
-      }
-    }
-
-    return {
-      id: recordTypeId,
-      name: recordTypeId ? recordTypeId : "Unavailable",
-      developerName: null,
-      source: recordTypeId ? "RecordTypeId field" : "Record type was not available for this object"
-    };
-  }
-
-  async function resolveCurrentApp(apiVersion, parsedPage) {
-    const appKey = parsedPage.appKey || appKeyFromNavigationLinks();
-    const domName = appNameFromDom();
-
-    if (appKey) {
-      const conditions = [
-        `DurableId = '${soqlString(appKey)}'`,
-        `DeveloperName = '${soqlString(appKey)}'`
-      ];
-      if (appKey.startsWith("standard__")) {
-        conditions.push(`DeveloperName = '${soqlString(appKey.replace(/^standard__/, ""))}'`);
-      }
-      if (isSalesforceId(appKey)) {
-        conditions.push(`Id = '${soqlString(appKey)}'`);
-      }
-
-      const soql = [
-        "SELECT Id, DurableId, DeveloperName, Label",
-        "FROM AppDefinition",
-        `WHERE ${conditions.join(" OR ")}`,
-        "LIMIT 1"
-      ].join(" ");
-      const response = await attempt("Tooling AppDefinition", () => toolingQuery(apiVersion, soql));
-      const record = response && response.records && response.records[0];
-      if (record) {
-        return {
-          id: record.Id || null,
-          name: record.Label || record.DeveloperName || record.DurableId,
-          developerName: record.DeveloperName || null,
-          durableId: record.DurableId || null,
-          source: "Tooling API AppDefinition"
-        };
-      }
-    }
-
-    if (domName) {
-      return {
-        id: null,
-        name: domName,
-        developerName: null,
-        durableId: appKey || null,
-        source: "Lightning navigation DOM"
-      };
-    }
-
-    return {
-      id: null,
-      name: appKey || "Unavailable",
-      developerName: null,
-      durableId: appKey || null,
-      source: appKey ? "Lightning URL app key" : "No current app marker found"
-    };
-  }
-
-  async function resolvePageLayout(apiVersion, parsedPage, user, recordType) {
-    if (!parsedPage.objectApiName || !user || !user.profileId) {
-      return {
-        id: null,
-        name: "Unavailable",
-        source: "Need an object and profile to resolve layout assignment"
-      };
-    }
-
-    const recordTypeCondition = recordType && recordType.id
-      ? `RecordTypeId = '${soqlString(recordType.id)}'`
-      : "RecordTypeId = null";
-    const assignmentQuery = [
-      "SELECT Id, LayoutId, Layout.Name, ProfileId, RecordTypeId, TableEnumOrId",
-      "FROM ProfileLayout",
-      `WHERE ProfileId = '${soqlString(user.profileId)}'`,
-      `AND TableEnumOrId = '${soqlString(parsedPage.objectApiName)}'`,
-      `AND ${recordTypeCondition}`,
-      "LIMIT 1"
-    ].join(" ");
-
-    let response = await attempt("Tooling ProfileLayout assignment", () => toolingQuery(apiVersion, assignmentQuery));
-    let assignment = response && response.records && response.records[0];
-
-    if (!assignment && recordType && recordType.id) {
-      const fallbackQuery = [
-        "SELECT Id, LayoutId, Layout.Name, ProfileId, RecordTypeId, TableEnumOrId",
-        "FROM ProfileLayout",
-        `WHERE ProfileId = '${soqlString(user.profileId)}'`,
-        `AND TableEnumOrId = '${soqlString(parsedPage.objectApiName)}'`,
-        "AND RecordTypeId = null",
-        "LIMIT 1"
-      ].join(" ");
-      response = await attempt("Tooling default ProfileLayout assignment", () => toolingQuery(apiVersion, fallbackQuery));
-      assignment = response && response.records && response.records[0];
-    }
-
-    if (assignment) {
-      return {
-        id: assignment.LayoutId || assignment.Id || null,
-        name: assignment.Layout && assignment.Layout.Name || assignment.LayoutId || "Assigned layout",
-        source: "Tooling API ProfileLayout assignment"
-      };
-    }
-
-    const recordTypeParam = recordType && recordType.id ? `&recordTypeId=${encodeURIComponent(recordType.id)}` : "";
-    const layout = await attempt(
-      "UI API layout fallback",
-      () => apiFetch(`/services/data/v${apiVersion}/ui-api/layout/${encodeURIComponent(parsedPage.objectApiName)}/Full/View?formFactor=Large${recordTypeParam}`)
-    );
-
-    if (layout) {
-      return {
-        id: layout.id || null,
-        name: layout.name || layout.fullName || "Resolved by UI API",
-        source: "UI API layout fallback"
-      };
-    }
-
-    return {
-      id: null,
-      name: "Unavailable",
-      source: "No layout assignment was returned"
-    };
-  }
-
-  async function apiFetch(path) {
-    const response = await fetch(path, {
-      method: "GET",
-      credentials: "same-origin",
-      headers: {
-        "Accept": "application/json"
-      }
-    });
-    const text = await response.text();
-    let body = null;
-
-    if (text) {
-      try {
-        body = JSON.parse(text);
-      } catch (_error) {
-        body = text;
-      }
-    }
-
-    if (!response.ok) {
-      throw new Error(`${path} returned ${response.status}: ${salesforceErrorMessage(body)}`);
-    }
-
-    return body;
-  }
-
-  async function query(apiVersion, soql) {
-    return apiFetch(`/services/data/v${apiVersion}/query/?q=${encodeURIComponent(soql)}`);
-  }
-
-  async function toolingQuery(apiVersion, soql) {
-    return apiFetch(`/services/data/v${apiVersion}/tooling/query/?q=${encodeURIComponent(soql)}`);
-  }
-
-  async function attempt(label, task) {
-    try {
-      return await task();
-    } catch (error) {
-      warnings.push(`${label}: ${error.message || String(error)}`);
-      return null;
+  for (const candidate of candidates) {
+    const exactName = allFields.find((field) => lower(field.name) === lower(candidate));
+    if (exactName) {
+      return exactName;
     }
   }
 
-  function parseSalesforcePage() {
-    const url = new URL(window.location.href);
-    const segments = url.pathname.split("/").filter(Boolean).map((segment) => safeDecode(segment));
-    const result = {
-      recordId: null,
-      objectApiName: null,
-      appKey: null,
-      pageType: "unknown"
-    };
-
-    const lightningIndex = segments.indexOf("lightning");
-    if (lightningIndex >= 0) {
-      readLightningSegments(segments.slice(lightningIndex + 1), result);
-    }
-
-    if (!result.recordId) {
-      const classicRecordMatch = url.pathname.match(/^\/([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)(?:[/?#]|$)/);
-      if (classicRecordMatch) {
-        result.recordId = classicRecordMatch[1];
-        result.pageType = "classicRecord";
-      }
-    }
-
-    if (!result.recordId) {
-      const decodedLocation = safeDecode(`${url.pathname}${url.search}${url.hash}`);
-      const recordMatch = decodedLocation.match(/\b([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)\b/);
-      if (recordMatch) {
-        result.recordId = recordMatch[1];
-        result.pageType = result.pageType === "unknown" ? "recordFromUrl" : result.pageType;
-      }
-    }
-
-    return result;
-  }
-
-  function readLightningSegments(segments, result) {
-    if (!segments.length) {
-      return;
-    }
-
-    if (segments[0] === "app") {
-      result.appKey = segments[1] || null;
-      readLightningSegments(segments.slice(2), result);
-      return;
-    }
-
-    if (segments[0] === "r") {
-      result.objectApiName = segments[1] || result.objectApiName;
-      result.recordId = isSalesforceId(segments[2]) ? segments[2] : result.recordId;
-      result.pageType = "record";
-      return;
-    }
-
-    if (segments[0] === "o") {
-      result.objectApiName = segments[1] || result.objectApiName;
-      result.pageType = "object";
-      return;
-    }
-
-    if (segments[0] === "setup" && segments[1] === "ObjectManager") {
-      result.objectApiName = segments[2] || result.objectApiName;
-      result.pageType = "setupObjectManager";
+  for (const candidate of candidates) {
+    const exactLabel = allFields.find((field) => lower(field.label) === lower(candidate));
+    if (exactLabel) {
+      return exactLabel;
     }
   }
 
-  function getUserIdFromPageGlobals() {
-    const candidates = [];
-
-    try {
-      if (window.$A && typeof window.$A.get === "function") {
-        candidates.push(window.$A.get("$SObjectType.CurrentUser.Id"));
-      }
-    } catch (_error) {
-      // Ignore framework access errors from partially loaded Lightning pages.
+  const normalizedCandidates = candidates.map((candidate) => normalizeLabel(candidate)).filter(Boolean);
+  for (const candidate of normalizedCandidates) {
+    const normalizedLabel = allFields.find((field) => normalizeLabel(field.label) === candidate);
+    if (normalizedLabel) {
+      return normalizedLabel;
     }
-
-    try {
-      candidates.push(window.UserContext && window.UserContext.userId);
-      candidates.push(window.SfdcApp && window.SfdcApp.userId);
-      candidates.push(window.sfdcPage && window.sfdcPage.userId);
-    } catch (_error) {
-      // Ignore page-global access errors.
-    }
-
-    return candidates.find((candidate) => isSalesforceId(candidate)) || null;
   }
 
-  function appNameFromDom() {
-    const selectors = [
-      ".slds-context-bar__app-name .slds-truncate",
-      ".slds-context-bar__app-name",
-      "one-app-nav-bar a[href*='/lightning/app/'] .slds-truncate",
-      "one-app-nav-bar a[href*='/lightning/app/']",
-      "a.slds-context-bar__label-action[href*='/lightning/app/']"
-    ];
+  for (const candidate of normalizedCandidates) {
+    const normalizedName = allFields.find((field) => normalizeLabel(field.name) === candidate);
+    if (normalizedName) {
+      return normalizedName;
+    }
+  }
 
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      const text = element && cleanText(element.textContent || element.getAttribute("title"));
-      if (text && text.toLowerCase() !== "app launcher") {
-        return text;
-      }
+  return null;
+}
+
+function candidateNames(context) {
+  const raw = [
+    context.fieldApiName,
+    context.fieldKey,
+    context.reportColumnKey,
+    context.reportColumnLabel,
+    context.columnLabel,
+    context.headerText,
+    context.ariaLabel
+  ];
+  const candidates = [];
+
+  for (const value of raw) {
+    if (!value || typeof value !== "string") {
+      continue;
     }
 
+    const cleaned = cleanColumnLabel(value);
+    if (cleaned) {
+      candidates.push(cleaned);
+    }
+
+    if (value.includes(".")) {
+      const parts = value.split(".").map((part) => cleanColumnLabel(part)).filter(Boolean);
+      candidates.push(parts[parts.length - 1]);
+    }
+
+    if (value.includes(":")) {
+      const parts = value.split(":").map((part) => cleanColumnLabel(part)).filter(Boolean);
+      candidates.push(parts[parts.length - 1]);
+    }
+  }
+
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function cleanColumnLabel(value) {
+  return String(value || "")
+    .replace(/\b(sorted|ascending|descending|editable|read only|read-only)\b/gi, " ")
+    .replace(/\b(row|column)\s+\d+\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[*:.\-\s]+|[*:.\-\s]+$/g, "");
+}
+
+function normalizeLabel(value) {
+  return cleanColumnLabel(value)
+    .toLowerCase()
+    .replace(/__c$/i, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function fieldNotFoundMessage(objectApiName, context, fields) {
+  const candidates = candidateNames(context);
+  const examples = fields
+    .filter((field) => field && field.updateable)
+    .slice(0, 8)
+    .map((field) => `${field.label || field.name} (${field.name})`)
+    .join(", ");
+
+  return [
+    `Could not match column "${candidates[0] || "unknown"}" to an updateable ${objectApiName} field.`,
+    examples ? `Examples of updateable fields: ${examples}.` : ""
+  ].filter(Boolean).join(" ");
+}
+
+function parseFieldValue(rawValue, field) {
+  const value = rawValue == null ? "" : String(rawValue).trim();
+  if (value === "") {
+    if (!field.nillable) {
+      throw new Error(`${field.label || field.name} is required and cannot be blank.`);
+    }
     return null;
   }
 
-  function appKeyFromNavigationLinks() {
-    const link = document.querySelector("a[href*='/lightning/app/']");
-    if (!link) {
-      return null;
+  if (field.type === "boolean") {
+    if (/^(true|yes|y|1|checked)$/i.test(value)) {
+      return true;
     }
-
-    try {
-      const url = new URL(link.href, window.location.origin);
-      const segments = url.pathname.split("/").filter(Boolean).map((segment) => safeDecode(segment));
-      const appIndex = segments.indexOf("app");
-      return appIndex >= 0 ? segments[appIndex + 1] || null : null;
-    } catch (_error) {
-      return null;
+    if (/^(false|no|n|0|unchecked)$/i.test(value)) {
+      return false;
     }
+    throw new Error(`${field.label || field.name} expects true or false.`);
   }
 
-  function idFromIdentityUrl(value) {
-    if (!value) {
-      return null;
+  if (["currency", "double", "percent"].includes(field.type)) {
+    const numeric = Number(value.replace(/[$,%\s]/g, "").replace(/,/g, ""));
+    if (!Number.isFinite(numeric)) {
+      throw new Error(`${field.label || field.name} expects a number.`);
     }
-    const match = String(value).match(/\/([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)$/);
-    return match ? match[1] : null;
+    return numeric;
   }
 
-  function isSalesforceId(value) {
-    return typeof value === "string" && /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value);
-  }
-
-  function isSafeObjectApiName(value) {
-    return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(value);
-  }
-
-  function soqlString(value) {
-    return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-  }
-
-  function salesforceErrorMessage(body) {
-    if (Array.isArray(body)) {
-      return body.map((entry) => entry && entry.message || JSON.stringify(entry)).join("; ");
+  if (["int", "long"].includes(field.type)) {
+    const integer = Number.parseInt(value.replace(/[,\s]/g, ""), 10);
+    if (!Number.isFinite(integer)) {
+      throw new Error(`${field.label || field.name} expects a whole number.`);
     }
-    if (body && typeof body === "object") {
-      return body.message || body.error_description || body.error || JSON.stringify(body);
-    }
-    return body || "No response body";
+    return integer;
   }
 
-  function safeDecode(value) {
-    try {
-      return decodeURIComponent(value);
-    } catch (_error) {
-      return value;
+  if (field.type === "date") {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw new Error(`${field.label || field.name} expects a date in YYYY-MM-DD format.`);
     }
+    return value;
   }
 
-  function cleanText(value) {
-    return String(value || "").replace(/\s+/g, " ").trim();
+  if (field.type === "datetime") {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new Error(`${field.label || field.name} expects a valid date and time.`);
+    }
+    return parsed.toISOString();
   }
+
+  if (field.type === "reference" && !/^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value)) {
+    throw new Error(`${field.label || field.name} expects a Salesforce record ID.`);
+  }
+
+  return value;
+}
+
+function normalizeId(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value) ? value : null;
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function objectValues(value) {
+  if (!value) {
+    return [];
+  }
+  return Array.isArray(value) ? value : Object.values(value);
+}
+
+function isNonEditableObject(value) {
+  return ["Dashboard", "Document", "Folder", "ListView", "Report"].includes(String(value || ""));
+}
+
+function lower(value) {
+  return String(value || "").toLowerCase();
+}
+
+function salesforceErrorMessage(body) {
+  if (Array.isArray(body)) {
+    return body.map((entry) => entry && entry.message || JSON.stringify(entry)).join("; ");
+  }
+  if (body && typeof body === "object") {
+    return body.message || body.error_description || body.error || JSON.stringify(body);
+  }
+  return body || "No response body";
 }

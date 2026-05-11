@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Salesforce 2 Perspective",
+  "name": "Salesforce Inline Editor",
   "version": "1.0.0",
-  "description": "Shows the Salesforce record type, profile, app, role, and page layout for the current page.",
+  "description": "Adds inline editing to Salesforce Lightning list views and report detail rows.",
   "permissions": [
     "activeTab",
+    "cookies",
     "scripting",
     "tabs"
   ],
@@ -17,7 +18,7 @@
     "https://*.my.site.com/*"
   ],
   "action": {
-    "default_title": "Salesforce 2 Perspective"
+    "default_title": "Toggle Salesforce Inline Editor"
   },
   "background": {
     "service_worker": "src/background.js",
