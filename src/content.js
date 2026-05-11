@@ -1,499 +1,956 @@
 (() => {
-  if (window.__salesforce2PerspectiveLoaded) {
-    window.dispatchEvent(new CustomEvent("sf2p:toggle"));
+  if (window.__salesforceInlineEditorLoaded) {
+    window.dispatchEvent(new CustomEvent("sfie:toggle"));
     return;
   }
 
-  window.__salesforce2PerspectiveLoaded = true;
+  window.__salesforceInlineEditorLoaded = true;
 
-  const PANEL_ID = "salesforce-2-perspective-panel";
-  let panelHost = null;
-  let shadowRoot = null;
-  let isOpen = false;
-  let lastContext = null;
+  const EDITABLE_CELL_SELECTOR = [
+    "td[role='gridcell']",
+    "[role='gridcell']:not(th)",
+    "td.slds-cell-edit",
+    "tbody td"
+  ].join(",");
+  const RECORD_ID_PATTERN = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
+  const IGNORED_FIELD_KEYS = new Set([
+    "action",
+    "actions",
+    "checkbox",
+    "rowaction",
+    "rowactions",
+    "rownumber",
+    "selectitem",
+    "selection"
+  ]);
+
+  let enabled = true;
+  let observer = null;
+  let scanTimer = null;
+  let activeEditor = null;
+  let toastHost = null;
 
   chrome.runtime.onMessage.addListener((message) => {
-    if (message && message.type === "SF2P_TOGGLE_PANEL") {
-      togglePanel();
+    if (message && message.type === "SFIE_TOGGLE") {
+      toggleEnabled();
     }
   });
 
-  window.addEventListener("sf2p:toggle", togglePanel);
+  window.addEventListener("sfie:toggle", toggleEnabled);
+  document.addEventListener("dblclick", onCellDoubleClick, true);
+  document.addEventListener("keydown", onDocumentKeyDown, true);
 
-  function togglePanel() {
-    ensurePanel();
-    isOpen = !isOpen;
-    panelHost.dataset.open = String(isOpen);
+  initialize();
 
-    if (isOpen) {
-      refreshContext();
+  function initialize() {
+    injectStyle();
+    ensureToastHost();
+    setEnabled(true, false);
+    observer = new MutationObserver(scheduleScan);
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true
+    });
+    scheduleScan();
+    showToast("Salesforce Inline Editor is on. Double-click highlighted cells to edit.", "info");
+  }
+
+  function toggleEnabled() {
+    setEnabled(!enabled, true);
+  }
+
+  function setEnabled(nextEnabled, announce) {
+    enabled = Boolean(nextEnabled);
+    document.documentElement.classList.toggle("sfie-enabled", enabled);
+
+    if (enabled) {
+      scheduleScan();
+    } else {
+      closeEditor();
+      clearCellMarkers();
+    }
+
+    if (announce) {
+      showToast(`Salesforce Inline Editor ${enabled ? "enabled" : "disabled"}.`, enabled ? "success" : "info");
     }
   }
 
-  function ensurePanel() {
-    if (panelHost) {
+  function scheduleScan() {
+    if (!enabled || scanTimer) {
       return;
     }
 
-    panelHost = document.createElement("div");
-    panelHost.id = PANEL_ID;
-    panelHost.dataset.open = "false";
-    document.documentElement.appendChild(panelHost);
-    shadowRoot = panelHost.attachShadow({ mode: "open" });
-
-    const style = document.createElement("style");
-    style.textContent = styles();
-
-    const container = document.createElement("aside");
-    container.className = "sf2p-panel";
-
-    const header = document.createElement("header");
-    header.className = "sf2p-header";
-
-    const titleGroup = document.createElement("div");
-    const eyebrow = document.createElement("div");
-    eyebrow.className = "sf2p-eyebrow";
-    eyebrow.textContent = "Salesforce";
-    const title = document.createElement("h1");
-    title.textContent = "2 Perspective";
-    titleGroup.append(eyebrow, title);
-
-    const actions = document.createElement("div");
-    actions.className = "sf2p-actions";
-    const refresh = button("Refresh", "sf2p-refresh");
-    refresh.addEventListener("click", refreshContext);
-    const close = button("Close", "sf2p-close");
-    close.addEventListener("click", () => {
-      isOpen = false;
-      panelHost.dataset.open = "false";
-    });
-    actions.append(refresh, close);
-    header.append(titleGroup, actions);
-
-    const body = document.createElement("main");
-    body.className = "sf2p-body";
-    body.dataset.role = "body";
-
-    container.append(header, body);
-    shadowRoot.append(style, container);
-    renderEmpty();
+    scanTimer = window.setTimeout(() => {
+      scanTimer = null;
+      scanCells();
+    }, 250);
   }
 
-  async function refreshContext() {
-    ensurePanel();
-    renderLoading();
+  function scanCells() {
+    if (!enabled || !document.body) {
+      return;
+    }
+
+    const cells = new Set();
+    for (const element of document.querySelectorAll(EDITABLE_CELL_SELECTOR)) {
+      const cell = normalizeCell(element);
+      if (cell) {
+        cells.add(cell);
+      }
+      if (cells.size >= 1500) {
+        break;
+      }
+    }
+
+    for (const cell of cells) {
+      if (isLikelyEditableCell(cell) && getCellContext(cell)) {
+        markEditable(cell);
+      } else {
+        unmarkEditable(cell);
+      }
+    }
+  }
+
+  function clearCellMarkers() {
+    for (const cell of document.querySelectorAll(".sfie-editable, .sfie-resolving, .sfie-recently-saved")) {
+      unmarkEditable(cell);
+      cell.classList.remove("sfie-resolving", "sfie-recently-saved");
+      cell.removeAttribute("data-sfie-title");
+    }
+  }
+
+  function markEditable(cell) {
+    cell.classList.add("sfie-editable");
+    cell.setAttribute("data-sfie-title", "Double-click to edit with Salesforce Inline Editor");
+  }
+
+  function unmarkEditable(cell) {
+    cell.classList.remove("sfie-editable");
+    cell.removeAttribute("data-sfie-title");
+  }
+
+  async function onCellDoubleClick(event) {
+    if (!enabled) {
+      return;
+    }
+
+    const cell = normalizeCell(event.target);
+    if (!cell || !cell.classList.contains("sfie-editable")) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    await openEditor(cell);
+  }
+
+  function onDocumentKeyDown(event) {
+    if (event.key === "Escape" && activeEditor) {
+      event.preventDefault();
+      closeEditor();
+    }
+  }
+
+  async function openEditor(cell) {
+    const context = getCellContext(cell);
+    if (!context) {
+      showToast("This cell does not expose enough row and column information to edit.", "error");
+      return;
+    }
+
+    closeEditor();
+    cell.classList.add("sfie-resolving");
 
     try {
-      const response = await sendMessage({ type: "SF2P_COLLECT_CONTEXT" });
-      if (!response || !response.ok) {
-        throw new Error(response && response.error || "Salesforce context was not returned.");
+      const response = await salesforceRequest({
+        action: "resolveField",
+        context
+      });
+
+      if (!response.ok) {
+        throw new Error(response.error || "Could not resolve this Salesforce field.");
       }
 
-      lastContext = response.context;
-      renderContext(response.context);
+      renderEditor(cell, context, response.result);
     } catch (error) {
-      renderError(error);
+      showToast(error.message || String(error), "error");
+    } finally {
+      cell.classList.remove("sfie-resolving");
     }
   }
 
-  function renderEmpty() {
-    const body = getBody();
-    replaceChildren(body, sectionIntro("Click Refresh to read the current Salesforce context."));
+  function renderEditor(cell, context, resolved) {
+    const editor = document.createElement("form");
+    editor.className = "sfie-editor";
+    editor.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveEditor(editor, cell, context, resolved);
+    });
+
+    const title = document.createElement("div");
+    title.className = "sfie-editor-title";
+    title.textContent = `${resolved.objectApiName}.${resolved.field.name}`;
+
+    const subtitle = document.createElement("div");
+    subtitle.className = "sfie-editor-subtitle";
+    subtitle.textContent = `${resolved.field.label} (${resolved.field.type})`;
+
+    const control = createFieldControl(resolved.field, getVisibleCellValue(cell));
+    control.classList.add("sfie-editor-control");
+
+    const buttons = document.createElement("div");
+    buttons.className = "sfie-editor-buttons";
+
+    const save = document.createElement("button");
+    save.type = "submit";
+    save.textContent = "Save";
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", closeEditor);
+
+    buttons.append(save, cancel);
+    editor.append(title, subtitle, control, buttons);
+    document.documentElement.append(editor);
+    positionEditor(editor, cell);
+
+    activeEditor = {
+      cell,
+      editor
+    };
+
+    window.setTimeout(() => {
+      control.focus();
+      if (typeof control.select === "function" && control.tagName !== "SELECT") {
+        control.select();
+      }
+    }, 0);
   }
 
-  function renderLoading() {
-    const body = getBody();
-    const loading = document.createElement("div");
-    loading.className = "sf2p-state";
-    const spinner = document.createElement("div");
-    spinner.className = "sf2p-spinner";
-    const text = document.createElement("p");
-    text.textContent = "Reading Salesforce context in the page...";
-    loading.append(spinner, text);
-    replaceChildren(body, loading);
+  async function saveEditor(editor, cell, context, resolved) {
+    const control = editor.querySelector(".sfie-editor-control");
+    const saveButton = editor.querySelector("button[type='submit']");
+    const nextValue = control.value;
+
+    saveButton.disabled = true;
+    saveButton.textContent = "Saving...";
+
+    try {
+      const response = await salesforceRequest({
+        action: "updateField",
+        context,
+        value: nextValue
+      });
+
+      if (!response.ok) {
+        throw new Error(response.error || "Salesforce rejected the update.");
+      }
+
+      updateVisibleCell(cell, displayValueForCell(nextValue, resolved.field));
+      cell.classList.add("sfie-recently-saved");
+      window.setTimeout(() => cell.classList.remove("sfie-recently-saved"), 1800);
+      closeEditor();
+      showToast(`Saved ${resolved.field.label}.`, "success");
+      scheduleScan();
+    } catch (error) {
+      saveButton.disabled = false;
+      saveButton.textContent = "Save";
+      showToast(error.message || String(error), "error");
+    }
   }
 
-  function renderError(error) {
-    const body = getBody();
-    const card = document.createElement("section");
-    card.className = "sf2p-error";
+  function closeEditor() {
+    if (activeEditor && activeEditor.editor) {
+      activeEditor.editor.remove();
+    }
+    activeEditor = null;
+  }
 
-    const title = document.createElement("h2");
-    title.textContent = "Could not read this page";
-    const message = document.createElement("p");
-    message.textContent = error && error.message || String(error);
-    const hint = document.createElement("p");
-    hint.className = "sf2p-muted";
-    hint.textContent = "Open a Salesforce page, make sure you are signed in, then try Refresh.";
-
-    card.append(title, message, hint);
-
-    if (lastContext) {
-      const previous = document.createElement("p");
-      previous.className = "sf2p-muted";
-      previous.textContent = "Showing no cached values; refresh will retry the live Salesforce APIs.";
-      card.append(previous);
+  function createFieldControl(field, currentValue) {
+    if (field.type === "boolean") {
+      const select = document.createElement("select");
+      appendOption(select, "true", "True");
+      appendOption(select, "false", "False");
+      select.value = /^(true|yes|checked)$/i.test(currentValue) ? "true" : "false";
+      return select;
     }
 
-    replaceChildren(body, card);
-  }
+    if (field.picklistValues && field.picklistValues.length) {
+      const select = document.createElement("select");
+      if (field.nillable) {
+        appendOption(select, "", "-- None --");
+      }
 
-  function renderContext(context) {
-    const body = getBody();
-    const fragment = document.createDocumentFragment();
+      for (const option of field.picklistValues) {
+        appendOption(select, option.value, option.label || option.value);
+      }
 
-    fragment.append(sectionIntro("Current Salesforce perspective"));
-    fragment.append(fieldCard("Record Type", context.recordType && context.recordType.name, context.recordType && detailLine(context.recordType)));
-    fragment.append(fieldCard("Profile", context.user && context.user.profileName, context.user && detailLine({ id: context.user.profileId, source: context.user.source })));
-    fragment.append(fieldCard("App", context.app && context.app.name, context.app && detailLine(context.app)));
-    fragment.append(fieldCard("Role", context.user && context.user.roleName, context.user && detailLine({ id: context.user.roleId, source: context.user.source })));
-    fragment.append(fieldCard("Page Layout", context.pageLayout && context.pageLayout.name, context.pageLayout && detailLine(context.pageLayout)));
-    fragment.append(recordSummary(context));
-
-    if (context.warnings && context.warnings.length) {
-      fragment.append(warningsList(context.warnings));
+      const matchingOption = Array.from(select.options).find((option) => {
+        return cleanText(option.value) === cleanText(currentValue) || cleanText(option.textContent) === cleanText(currentValue);
+      });
+      select.value = matchingOption ? matchingOption.value : "";
+      return select;
     }
 
-    replaceChildren(body, fragment);
-  }
-
-  function sectionIntro(text) {
-    const section = document.createElement("section");
-    section.className = "sf2p-intro";
-    const paragraph = document.createElement("p");
-    paragraph.textContent = text;
-    section.append(paragraph);
-    return section;
-  }
-
-  function fieldCard(label, value, detail) {
-    const section = document.createElement("section");
-    section.className = "sf2p-card";
-
-    const fieldLabel = document.createElement("div");
-    fieldLabel.className = "sf2p-label";
-    fieldLabel.textContent = label;
-
-    const fieldValue = document.createElement("div");
-    fieldValue.className = "sf2p-value";
-    fieldValue.textContent = value || "Unavailable";
-
-    section.append(fieldLabel, fieldValue);
-
-    if (detail) {
-      const detailElement = document.createElement("div");
-      detailElement.className = "sf2p-detail";
-      detailElement.textContent = detail;
-      section.append(detailElement);
+    if (field.type === "textarea" || field.length > 255) {
+      const textarea = document.createElement("textarea");
+      textarea.rows = 4;
+      textarea.value = currentValue;
+      return textarea;
     }
 
-    return section;
+    const input = document.createElement("input");
+    input.type = inputTypeForField(field.type);
+    input.value = inputValueForField(currentValue, field.type);
+    return input;
   }
 
-  function recordSummary(context) {
-    const section = document.createElement("section");
-    section.className = "sf2p-summary";
+  function appendOption(select, value, label) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.append(option);
+  }
 
-    const title = document.createElement("h2");
-    title.textContent = "Page";
-    section.append(title);
+  function inputTypeForField(fieldType) {
+    if (["currency", "double", "int", "long", "percent"].includes(fieldType)) {
+      return "number";
+    }
+    if (fieldType === "date") {
+      return "date";
+    }
+    if (fieldType === "datetime") {
+      return "datetime-local";
+    }
+    return "text";
+  }
 
-    const rows = [
-      ["Object", context.record && context.record.objectApiName],
-      ["Record ID", context.record && context.record.id],
-      ["Page type", context.record && context.record.pageType],
-      ["Org host", context.org && context.org.host],
-      ["API version", context.org && context.org.apiVersion],
-      ["Read at", context.generatedAt]
+  function inputValueForField(value, fieldType) {
+    if (fieldType === "date") {
+      const match = value.match(/\d{4}-\d{2}-\d{2}/);
+      return match ? match[0] : "";
+    }
+
+    if (fieldType === "datetime") {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return "";
+      }
+      const offset = date.getTimezoneOffset() * 60000;
+      return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+    }
+
+    if (["currency", "double", "int", "long", "percent"].includes(fieldType)) {
+      return value.replace(/[$,%\s]/g, "").replace(/,/g, "");
+    }
+
+    return value;
+  }
+
+  function displayValueForCell(value, field) {
+    if (field.type === "boolean") {
+      return value === "true" ? "True" : "False";
+    }
+
+    if (field.picklistValues && field.picklistValues.length) {
+      const option = field.picklistValues.find((entry) => entry.value === value);
+      return option && option.label || value;
+    }
+
+    return value;
+  }
+
+  function positionEditor(editor, cell) {
+    const rect = cell.getBoundingClientRect();
+    const width = Math.min(Math.max(rect.width, 280), 420);
+    const left = Math.min(Math.max(rect.left, 12), window.innerWidth - width - 12);
+    const top = rect.bottom + 8 <= window.innerHeight - 170
+      ? rect.bottom + 8
+      : Math.max(12, rect.top - 170);
+
+    editor.style.left = `${left}px`;
+    editor.style.top = `${top}px`;
+    editor.style.width = `${width}px`;
+  }
+
+  function updateVisibleCell(cell, value) {
+    const target = findDisplayTarget(cell);
+    if (target) {
+      target.textContent = value || "";
+      return;
+    }
+
+    cell.textContent = value || "";
+  }
+
+  function findDisplayTarget(cell) {
+    const selectors = [
+      "lightning-formatted-text",
+      "lightning-formatted-number",
+      "lightning-formatted-email",
+      "lightning-formatted-url",
+      "span.slds-truncate",
+      "a[href]",
+      "span",
+      "div"
     ];
 
-    for (const [label, value] of rows) {
-      const row = document.createElement("div");
-      row.className = "sf2p-row";
-      const rowLabel = document.createElement("span");
-      rowLabel.textContent = label;
-      const rowValue = document.createElement("strong");
-      rowValue.textContent = value || "Unavailable";
-      row.append(rowLabel, rowValue);
-      section.append(row);
+    for (const selector of selectors) {
+      const target = cell.querySelector(selector);
+      if (target && cleanText(target.textContent || target.getAttribute("title"))) {
+        return target;
+      }
     }
 
-    return section;
+    return null;
   }
 
-  function warningsList(warnings) {
-    const section = document.createElement("section");
-    section.className = "sf2p-warnings";
-    const title = document.createElement("h2");
-    title.textContent = "Notes";
-    const list = document.createElement("ul");
-
-    for (const warning of warnings.slice(0, 8)) {
-      const item = document.createElement("li");
-      item.textContent = warning;
-      list.append(item);
+  function getCellContext(cell) {
+    const row = findRow(cell);
+    if (!row) {
+      return null;
     }
 
-    if (warnings.length > 8) {
-      const item = document.createElement("li");
-      item.textContent = `${warnings.length - 8} more notes omitted.`;
-      list.append(item);
+    const record = findRecordContext(cell, row);
+    if (!record.recordId) {
+      return null;
     }
 
-    section.append(title, list);
-    return section;
+    const column = findColumnContext(cell, row);
+    if (!column.fieldApiName && !column.fieldKey && !column.columnLabel && !column.headerText) {
+      return null;
+    }
+
+    if (isIgnoredField(column.fieldApiName || column.fieldKey || column.columnLabel || column.headerText)) {
+      return null;
+    }
+
+    return {
+      recordId: record.recordId,
+      objectApiName: record.objectApiName || objectApiNameFromPageUrl(),
+      fieldApiName: column.fieldApiName,
+      fieldKey: column.fieldKey,
+      columnLabel: column.columnLabel,
+      headerText: column.headerText,
+      ariaLabel: column.ariaLabel
+    };
   }
 
-  function detailLine(value) {
-    const parts = [];
-    if (value.id) {
-      parts.push(value.id);
+  function findRecordContext(cell, row) {
+    const cellAttributeRecord = readRecordAttributes(cell);
+    if (cellAttributeRecord.recordId) {
+      return cellAttributeRecord;
     }
-    if (value.developerName) {
-      parts.push(value.developerName);
+
+    const rowAttributeRecord = readRecordAttributes(row);
+    if (rowAttributeRecord.recordId) {
+      return rowAttributeRecord;
     }
-    if (value.durableId && value.durableId !== value.id) {
-      parts.push(value.durableId);
+
+    const descendantRecord = readRecordAttributes(findRecordAttributeElement(cell) || findRecordAttributeElement(row));
+    if (descendantRecord.recordId) {
+      return descendantRecord;
     }
-    if (value.source) {
-      parts.push(value.source);
+
+    const links = [
+      ...Array.from(cell.querySelectorAll("a[href]")),
+      ...Array.from(row.querySelectorAll("a[href]"))
+    ];
+
+    for (const link of links) {
+      const parsed = parseRecordUrl(link.href || link.getAttribute("href"));
+      if (parsed.recordId) {
+        return parsed;
+      }
     }
-    return parts.join(" | ");
+
+    const rowText = `${row.getAttribute("data-row-key-value") || ""} ${row.getAttribute("aria-label") || ""}`;
+    const match = rowText.match(/\b([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)\b/);
+    return {
+      recordId: match ? match[1] : null,
+      objectApiName: objectApiNameFromPageUrl()
+    };
   }
 
-  function button(label, className) {
-    const element = document.createElement("button");
-    element.type = "button";
-    element.className = className;
-    element.textContent = label;
-    return element;
+  function readRecordAttributes(element) {
+    if (!element) {
+      return {
+        recordId: null,
+        objectApiName: null
+      };
+    }
+
+    const names = [
+      "data-record-id",
+      "data-recordid",
+      "data-row-key-value",
+      "data-row-key",
+      "record-id"
+    ];
+
+    for (const name of names) {
+      const value = element.getAttribute && element.getAttribute(name);
+      if (RECORD_ID_PATTERN.test(value || "")) {
+        return {
+          recordId: value,
+          objectApiName: objectApiNameFromPageUrl()
+        };
+      }
+    }
+
+    return {
+      recordId: null,
+      objectApiName: null
+    };
   }
 
-  function getBody() {
-    return shadowRoot.querySelector("[data-role='body']");
+  function findRecordAttributeElement(root) {
+    return root && root.querySelector && root.querySelector([
+      "[data-record-id]",
+      "[data-recordid]",
+      "[data-row-key-value]",
+      "[data-row-key]",
+      "[record-id]"
+    ].join(","));
   }
 
-  function replaceChildren(parent, child) {
-    parent.textContent = "";
-    parent.append(child);
+  function findColumnContext(cell, row) {
+    const fieldApiName = firstAttribute(cell, [
+      "data-field-name",
+      "data-field",
+      "field-name"
+    ]);
+    const fieldKey = firstAttribute(cell, [
+      "data-col-key-value",
+      "data-column-key",
+      "data-column",
+      "col-key-value"
+    ]);
+    const columnLabel = firstAttribute(cell, [
+      "data-label",
+      "aria-labelledby"
+    ]);
+    const headerText = headerTextForCell(cell, row);
+    const ariaLabel = cleanAriaLabel(cell.getAttribute("aria-label"));
+
+    return {
+      fieldApiName: cleanFieldKey(fieldApiName),
+      fieldKey: cleanFieldKey(fieldKey),
+      columnLabel: labelFromAttribute(columnLabel),
+      headerText,
+      ariaLabel
+    };
   }
 
-  function sendMessage(message) {
+  function headerTextForCell(cell, row) {
+    const explicitHeaders = cell.getAttribute("headers");
+    if (explicitHeaders) {
+      const headerText = explicitHeaders
+        .split(/\s+/)
+        .map((id) => document.getElementById(id))
+        .map((header) => header && cleanText(header.textContent || header.getAttribute("title")))
+        .filter(Boolean)
+        .join(" ");
+      if (headerText) {
+        return headerText;
+      }
+    }
+
+    const table = cell.closest("table");
+    const cellIndex = tableCellIndex(cell, row);
+    if (table && cellIndex >= 0) {
+      const headers = Array.from(table.querySelectorAll("thead th, [role='columnheader']"));
+      const header = headers[cellIndex];
+      const text = header && cleanText(header.textContent || header.getAttribute("title") || header.getAttribute("aria-label"));
+      if (text) {
+        return text;
+      }
+    }
+
+    const ariaColumn = Number.parseInt(cell.getAttribute("aria-colindex") || "", 10);
+    if (Number.isFinite(ariaColumn)) {
+      const header = document.querySelector(`[role='columnheader'][aria-colindex='${ariaColumn}']`);
+      const text = header && cleanText(header.textContent || header.getAttribute("title") || header.getAttribute("aria-label"));
+      if (text) {
+        return text;
+      }
+    }
+
+    return "";
+  }
+
+  function tableCellIndex(cell, row) {
+    if (typeof cell.cellIndex === "number" && cell.cellIndex >= 0) {
+      return cell.cellIndex;
+    }
+
+    const cells = Array.from(row.querySelectorAll("td, th, [role='gridcell'], [role='columnheader']"));
+    return cells.indexOf(cell);
+  }
+
+  function normalizeCell(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+      return null;
+    }
+
+    return element.closest("td, [role='gridcell']");
+  }
+
+  function findRow(cell) {
+    return cell.closest("[role='row'], tr, .slds-hint-parent, .dataRow");
+  }
+
+  function isLikelyEditableCell(cell) {
+    if (!cell || cell.closest(".sfie-editor") || !isVisible(cell)) {
+      return false;
+    }
+
+    if (cell.matches("th, [role='columnheader']")) {
+      return false;
+    }
+
+    const text = getVisibleCellValue(cell);
+    const hasOnlyControl = cell.querySelector("button, input[type='checkbox'], input[type='radio']") && text.length < 2;
+    if (hasOnlyControl) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function isVisible(element) {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  }
+
+  function getVisibleCellValue(cell) {
+    const text = cleanText(cell.innerText || cell.textContent || cell.getAttribute("title"));
+    return text.replace(/\bEdit\b$/i, "").trim();
+  }
+
+  function firstAttribute(element, names) {
+    for (const name of names) {
+      const value = element.getAttribute(name);
+      if (value) {
+        return value;
+      }
+    }
+    return "";
+  }
+
+  function cleanFieldKey(value) {
+    const cleaned = cleanText(value);
+    if (!cleaned) {
+      return "";
+    }
+
+    return cleaned
+      .replace(/^.*:/, "")
+      .replace(/\.(value|displayValue)$/i, "")
+      .trim();
+  }
+
+  function labelFromAttribute(value) {
+    if (!value) {
+      return "";
+    }
+
+    if (value.includes(" ")) {
+      const labels = value
+        .split(/\s+/)
+        .map((id) => document.getElementById(id))
+        .map((element) => element && cleanText(element.textContent || element.getAttribute("title")))
+        .filter(Boolean);
+      if (labels.length) {
+        return labels.join(" ");
+      }
+    }
+
+    return cleanText(value);
+  }
+
+  function cleanAriaLabel(value) {
+    return cleanText(value)
+      .replace(/\b(row|column)\s+\d+\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function isIgnoredField(value) {
+    return IGNORED_FIELD_KEYS.has(cleanText(value).toLowerCase().replace(/[^a-z0-9]/g, ""));
+  }
+
+  function parseRecordUrl(value) {
+    if (!value) {
+      return {
+        recordId: null,
+        objectApiName: null
+      };
+    }
+
+    try {
+      const url = new URL(value, window.location.origin);
+      const decodedPath = safeDecode(url.pathname);
+      const lightningMatch = decodedPath.match(/\/lightning\/r\/([^/]+)\/([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)(?:[/?#]|$)/);
+      if (lightningMatch) {
+        return {
+          objectApiName: lightningMatch[1],
+          recordId: lightningMatch[2]
+        };
+      }
+
+      const classicMatch = decodedPath.match(/^\/([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)(?:[/?#]|$)/);
+      if (classicMatch) {
+        return {
+          objectApiName: objectApiNameFromPageUrl(),
+          recordId: classicMatch[1]
+        };
+      }
+
+      const anyIdMatch = `${decodedPath}${url.search}${url.hash}`.match(/\b([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)\b/);
+      return {
+        objectApiName: objectApiNameFromPageUrl(),
+        recordId: anyIdMatch ? anyIdMatch[1] : null
+      };
+    } catch (_error) {
+      return {
+        recordId: null,
+        objectApiName: null
+      };
+    }
+  }
+
+  function objectApiNameFromPageUrl() {
+    try {
+      const url = new URL(window.location.href);
+      const segments = url.pathname.split("/").filter(Boolean).map((segment) => safeDecode(segment));
+      const lightningIndex = segments.indexOf("lightning");
+      const lightningSegments = lightningIndex >= 0 ? segments.slice(lightningIndex + 1) : segments;
+      const objectIndex = lightningSegments.indexOf("o");
+      if (objectIndex >= 0 && lightningSegments[objectIndex + 1]) {
+        return lightningSegments[objectIndex + 1];
+      }
+
+      const recordIndex = lightningSegments.indexOf("r");
+      if (recordIndex >= 0 && lightningSegments[recordIndex + 1]) {
+        return lightningSegments[recordIndex + 1];
+      }
+    } catch (_error) {
+      return null;
+    }
+
+    return null;
+  }
+
+  function salesforceRequest(payload) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(message, (response) => {
+      chrome.runtime.sendMessage({ type: "SFIE_API_REQUEST", payload }, (response) => {
         const lastError = chrome.runtime.lastError;
         if (lastError) {
           reject(new Error(lastError.message));
           return;
         }
-        resolve(response);
+        resolve(response || { ok: false, error: "No response from Salesforce Inline Editor." });
       });
     });
   }
 
-  function styles() {
-    return `
-      :host {
-        all: initial;
+  function ensureToastHost() {
+    if (toastHost) {
+      return;
+    }
+
+    toastHost = document.createElement("div");
+    toastHost.className = "sfie-toast-host";
+    document.documentElement.append(toastHost);
+  }
+
+  function showToast(message, variant) {
+    ensureToastHost();
+    const toast = document.createElement("div");
+    toast.className = `sfie-toast sfie-toast-${variant || "info"}`;
+    toast.textContent = message;
+    toastHost.append(toast);
+
+    window.setTimeout(() => {
+      toast.classList.add("sfie-toast-exit");
+      window.setTimeout(() => toast.remove(), 220);
+    }, variant === "error" ? 6500 : 3200);
+  }
+
+  function injectStyle() {
+    if (document.getElementById("sfie-style")) {
+      return;
+    }
+
+    const style = document.createElement("style");
+    style.id = "sfie-style";
+    style.textContent = `
+      html.sfie-enabled .sfie-editable {
+        outline: 1px dashed rgba(1, 118, 211, 0.42) !important;
+        outline-offset: -2px !important;
+        position: relative !important;
       }
 
-      .sf2p-panel {
-        background: #f7f9fb;
-        border-left: 1px solid #d8dde6;
-        box-shadow: -10px 0 30px rgba(24, 24, 24, 0.18);
+      html.sfie-enabled .sfie-editable:hover {
+        background: rgba(1, 118, 211, 0.08) !important;
+        cursor: cell !important;
+      }
+
+      html.sfie-enabled .sfie-editable:hover::after {
+        background: #0176d3;
+        border-radius: 999px;
+        bottom: 4px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+        color: #fff;
+        content: "Edit";
+        font: 700 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        padding: 4px 7px;
+        pointer-events: none;
+        position: absolute;
+        right: 4px;
+        z-index: 2147483646;
+      }
+
+      html.sfie-enabled .sfie-resolving {
+        outline-color: #fe9339 !important;
+      }
+
+      html.sfie-enabled .sfie-recently-saved {
+        animation: sfie-saved-pulse 1.8s ease-out;
+      }
+
+      .sfie-editor {
+        background: #fff;
+        border: 1px solid #d8dde6;
+        border-radius: 12px;
+        box-shadow: 0 14px 38px rgba(24, 24, 24, 0.26);
+        box-sizing: border-box;
         color: #181818;
-        display: flex;
-        flex-direction: column;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        height: 100vh;
-        line-height: 1.4;
+        display: grid;
+        gap: 8px;
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        padding: 12px;
         position: fixed;
-        right: 0;
-        top: 0;
-        transform: translateX(105%);
-        transition: transform 160ms ease;
-        width: min(420px, 92vw);
         z-index: 2147483647;
       }
 
-      :host([data-open="true"]) .sf2p-panel {
-        transform: translateX(0);
-      }
-
-      .sf2p-header {
-        align-items: center;
-        background: linear-gradient(135deg, #0176d3, #032d60);
-        color: #fff;
-        display: flex;
-        justify-content: space-between;
-        padding: 18px;
-      }
-
-      .sf2p-eyebrow {
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        opacity: 0.8;
-        text-transform: uppercase;
-      }
-
-      h1,
-      h2,
-      p {
-        margin: 0;
-      }
-
-      h1 {
-        font-size: 22px;
-        font-weight: 700;
-      }
-
-      h2 {
-        font-size: 14px;
-        margin-bottom: 8px;
-      }
-
-      .sf2p-actions {
-        display: flex;
-        gap: 8px;
-      }
-
-      button {
-        appearance: none;
-        background: rgba(255, 255, 255, 0.12);
-        border: 1px solid rgba(255, 255, 255, 0.35);
-        border-radius: 999px;
-        color: #fff;
-        cursor: pointer;
-        font: inherit;
-        font-size: 12px;
-        font-weight: 700;
-        padding: 7px 10px;
-      }
-
-      button:hover {
-        background: rgba(255, 255, 255, 0.22);
-      }
-
-      .sf2p-body {
-        display: flex;
-        flex: 1;
-        flex-direction: column;
-        gap: 12px;
-        overflow: auto;
-        padding: 16px;
-      }
-
-      .sf2p-intro,
-      .sf2p-card,
-      .sf2p-summary,
-      .sf2p-warnings,
-      .sf2p-error,
-      .sf2p-state {
-        background: #fff;
-        border: 1px solid #e5e5e5;
-        border-radius: 12px;
-        box-shadow: 0 1px 2px rgba(24, 24, 24, 0.04);
-        padding: 14px;
-      }
-
-      .sf2p-intro {
-        background: #eef4ff;
-        border-color: #aacbff;
+      .sfie-editor-title {
         color: #032d60;
-        font-weight: 600;
-      }
-
-      .sf2p-label {
-        color: #5c5c5c;
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
-      }
-
-      .sf2p-value {
-        color: #080707;
-        font-size: 18px;
-        font-weight: 750;
-        margin-top: 4px;
+        font-weight: 800;
         overflow-wrap: anywhere;
       }
 
-      .sf2p-detail,
-      .sf2p-muted {
+      .sfie-editor-subtitle {
         color: #706e6b;
         font-size: 12px;
-        margin-top: 6px;
         overflow-wrap: anywhere;
       }
 
-      .sf2p-row {
-        align-items: start;
-        border-top: 1px solid #f0f0f0;
-        display: grid;
-        gap: 10px;
-        grid-template-columns: 90px 1fr;
-        padding: 8px 0;
+      .sfie-editor-control {
+        background: #fff;
+        border: 1px solid #747474;
+        border-radius: 6px;
+        box-sizing: border-box;
+        color: #080707;
+        font: inherit;
+        min-height: 34px;
+        padding: 7px 9px;
+        width: 100%;
       }
 
-      .sf2p-row span {
-        color: #5c5c5c;
-        font-size: 12px;
+      textarea.sfie-editor-control {
+        resize: vertical;
       }
 
-      .sf2p-row strong {
-        font-size: 12px;
-        font-weight: 700;
-        overflow-wrap: anywhere;
-      }
-
-      .sf2p-warnings {
-        background: #fff8e6;
-        border-color: #f9e3b6;
-      }
-
-      .sf2p-warnings ul {
-        margin: 0;
-        padding-left: 18px;
-      }
-
-      .sf2p-warnings li {
-        color: #5c3b00;
-        font-size: 12px;
-        margin: 5px 0;
-        overflow-wrap: anywhere;
-      }
-
-      .sf2p-error {
-        background: #fef1ee;
-        border-color: #ea001e;
-      }
-
-      .sf2p-error h2 {
-        color: #ba0517;
-      }
-
-      .sf2p-state {
-        align-items: center;
+      .sfie-editor-buttons {
         display: flex;
-        gap: 12px;
+        gap: 8px;
+        justify-content: flex-end;
       }
 
-      .sf2p-spinner {
-        animation: sf2p-spin 1s linear infinite;
-        border: 3px solid #d8dde6;
-        border-top-color: #0176d3;
-        border-radius: 50%;
-        height: 22px;
-        width: 22px;
+      .sfie-editor button {
+        appearance: none;
+        border: 1px solid #0176d3;
+        border-radius: 999px;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 700;
+        padding: 6px 12px;
       }
 
-      @keyframes sf2p-spin {
-        to {
-          transform: rotate(360deg);
+      .sfie-editor button[type="submit"] {
+        background: #0176d3;
+        color: #fff;
+      }
+
+      .sfie-editor button[type="button"] {
+        background: #fff;
+        color: #0176d3;
+      }
+
+      .sfie-editor button:disabled {
+        cursor: wait;
+        opacity: 0.72;
+      }
+
+      .sfie-toast-host {
+        display: grid;
+        gap: 8px;
+        pointer-events: none;
+        position: fixed;
+        right: 18px;
+        top: 78px;
+        width: min(420px, calc(100vw - 36px));
+        z-index: 2147483647;
+      }
+
+      .sfie-toast {
+        background: #032d60;
+        border-radius: 10px;
+        box-shadow: 0 8px 24px rgba(24, 24, 24, 0.24);
+        color: #fff;
+        font: 700 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        padding: 12px 14px;
+        transition: opacity 180ms ease, transform 180ms ease;
+      }
+
+      .sfie-toast-success {
+        background: #2e844a;
+      }
+
+      .sfie-toast-error {
+        background: #ba0517;
+      }
+
+      .sfie-toast-exit {
+        opacity: 0;
+        transform: translateY(-8px);
+      }
+
+      @keyframes sfie-saved-pulse {
+        0% {
+          background: rgba(46, 132, 74, 0.28);
+        }
+        100% {
+          background: transparent;
         }
       }
     `;
+    document.documentElement.append(style);
+  }
+
+  function cleanText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function safeDecode(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch (_error) {
+      return value;
+    }
   }
 })();

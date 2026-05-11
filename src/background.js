@@ -15,7 +15,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 
   try {
     await sendToggle(tab.id);
-  } catch (error) {
+  } catch (_error) {
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -23,14 +23,14 @@ chrome.action.onClicked.addListener(async (tab) => {
       });
       await sendToggle(tab.id);
     } catch (injectionError) {
-      console.error("Salesforce 2 Perspective could not open the side panel.", injectionError);
+      console.error("Salesforce Inline Editor could not start.", injectionError);
       await flashBadge("!");
     }
   }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== "SF2P_COLLECT_CONTEXT") {
+  if (!message || message.type !== "SFIE_API_REQUEST") {
     return false;
   }
 
@@ -40,10 +40,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  collectContext(tabId)
-    .then((context) => sendResponse({ ok: true, context }))
+  runSalesforceApiRequest(tabId, message.payload)
+    .then((result) => sendResponse(result))
     .catch((error) => {
-      console.error("Salesforce 2 Perspective collection failed.", error);
+      console.error("Salesforce Inline Editor request failed.", error);
       sendResponse({ ok: false, error: error.message || String(error) });
     });
 
@@ -65,7 +65,7 @@ function isSalesforceUrl(url) {
 }
 
 async function sendToggle(tabId) {
-  await chrome.tabs.sendMessage(tabId, { type: "SF2P_TOGGLE_PANEL" });
+  await chrome.tabs.sendMessage(tabId, { type: "SFIE_TOGGLE" });
 }
 
 async function flashBadge(text) {
@@ -76,73 +76,71 @@ async function flashBadge(text) {
   }, 2000);
 }
 
-async function collectContext(tabId) {
+async function runSalesforceApiRequest(tabId, payload) {
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    func: collectSalesforcePerspectiveInPage
+    func: salesforceApiBridge,
+    args: [payload]
   });
 
   if (!result || !result.result) {
-    throw new Error("Salesforce did not return any page context.");
-  }
-
-  if (!result.result.ok) {
-    throw new Error(result.result.error || "Salesforce page context collection failed.");
+    return { ok: false, error: "Salesforce did not return a response." };
   }
 
   return result.result;
 }
 
-async function collectSalesforcePerspectiveInPage() {
+async function salesforceApiBridge(payload) {
   const warnings = [];
-  const generatedAt = new Date().toISOString();
 
   try {
-    const parsedPage = parseSalesforcePage();
-    const apiVersion = await getLatestApiVersion();
-    let user = await getCurrentUser(apiVersion);
-
-    if (!parsedPage.objectApiName && parsedPage.recordId) {
-      const objectFromPrefix = await resolveObjectFromRecordPrefix(apiVersion, parsedPage.recordId);
-      if (objectFromPrefix) {
-        parsedPage.objectApiName = objectFromPrefix;
-      }
+    if (!payload || !payload.action) {
+      throw new Error("No Salesforce Inline Editor action was provided.");
     }
 
-    const objectInfo = parsedPage.objectApiName
-      ? await attempt("Object info", () => apiFetch(`/services/data/v${apiVersion}/ui-api/object-info/${encodeURIComponent(parsedPage.objectApiName)}`))
-      : null;
+    const apiVersion = await getLatestApiVersion();
 
-    const recordType = await resolveRecordType(apiVersion, parsedPage, objectInfo);
-    const app = await resolveCurrentApp(apiVersion, parsedPage);
-    const pageLayout = await resolvePageLayout(apiVersion, parsedPage, user, recordType);
+    if (payload.action === "resolveField") {
+      const resolved = await resolveField(apiVersion, payload.context || {});
+      return {
+        ok: true,
+        apiVersion,
+        result: resolved,
+        warnings
+      };
+    }
 
-    return {
-      ok: true,
-      generatedAt,
-      currentUrl: window.location.href,
-      org: {
-        host: window.location.host,
-        apiVersion
-      },
-      user,
-      app,
-      record: {
-        id: parsedPage.recordId || null,
-        objectApiName: parsedPage.objectApiName || null,
-        pageType: parsedPage.pageType || "unknown"
-      },
-      recordType,
-      pageLayout,
-      warnings
-    };
+    if (payload.action === "updateField") {
+      const resolved = await resolveField(apiVersion, payload.context || {});
+      const parsedValue = parseFieldValue(payload.value, resolved.field);
+
+      await apiFetch(`/services/data/v${apiVersion}/sobjects/${encodeURIComponent(resolved.objectApiName)}/${encodeURIComponent(resolved.recordId)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          [resolved.field.name]: parsedValue
+        })
+      });
+
+      return {
+        ok: true,
+        apiVersion,
+        result: {
+          ...resolved,
+          savedValue: parsedValue
+        },
+        warnings
+      };
+    }
+
+    throw new Error(`Unsupported Salesforce Inline Editor action: ${payload.action}`);
   } catch (error) {
     return {
       ok: false,
       error: error.message || String(error),
-      generatedAt,
-      currentUrl: window.location.href,
       warnings
     };
   }
@@ -162,256 +160,231 @@ async function collectSalesforcePerspectiveInPage() {
     return latest || "60.0";
   }
 
-  async function getCurrentUser(apiVersion) {
-    const pageUserId = getUserIdFromPageGlobals();
-    const userInfo = await attempt("OAuth user info", () => apiFetch("/services/oauth2/userinfo"));
-    const userId = pageUserId || userInfo && (userInfo.user_id || userInfo.userId || idFromIdentityUrl(userInfo.sub));
-
-    if (!userId || !isSalesforceId(userId)) {
-      return {
-        id: userId || null,
-        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
-        profileId: null,
-        profileName: "Unavailable",
-        roleId: null,
-        roleName: "Unavailable",
-        source: "OAuth userinfo; SOQL user lookup unavailable"
-      };
+  async function resolveField(apiVersion, context) {
+    const recordId = normalizeId(context.recordId);
+    if (!recordId) {
+      throw new Error("This row does not expose a Salesforce record ID.");
     }
 
-    const soql = [
-      "SELECT Id, Name, ProfileId, Profile.Name, UserRoleId, UserRole.Name",
-      "FROM User",
-      `WHERE Id = '${soqlString(userId)}'`,
-      "LIMIT 1"
-    ].join(" ");
-    const response = await attempt("User profile and role", () => query(apiVersion, soql));
-    const record = response && response.records && response.records[0];
+    const objectApiName = context.objectApiName || await resolveObjectFromRecordPrefix(apiVersion, recordId);
+    if (!objectApiName) {
+      throw new Error(`Could not resolve the object type for record ${recordId}.`);
+    }
 
-    if (!record) {
-      return {
-        id: userId,
-        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
-        profileId: null,
-        profileName: "Unavailable",
-        roleId: null,
-        roleName: "Unavailable",
-        source: "Current user id; SOQL user lookup returned no rows"
-      };
+    const describe = await apiFetch(`/services/data/v${apiVersion}/sobjects/${encodeURIComponent(objectApiName)}/describe`);
+    const field = findField(describe.fields || [], context);
+    if (!field) {
+      throw new Error(fieldNotFoundMessage(objectApiName, context, describe.fields || []));
+    }
+
+    if (!field.updateable) {
+      throw new Error(`${field.label || field.name} (${field.name}) is not updateable for ${objectApiName}.`);
+    }
+
+    if (field.calculated || field.autoNumber) {
+      throw new Error(`${field.label || field.name} (${field.name}) is calculated or auto-numbered and cannot be edited.`);
     }
 
     return {
-      id: record.Id,
-      name: record.Name,
-      profileId: record.ProfileId || null,
-      profileName: record.Profile && record.Profile.Name || "Unavailable",
-      roleId: record.UserRoleId || null,
-      roleName: record.UserRole && record.UserRole.Name || "No role assigned",
-      source: "REST SOQL User query"
+      recordId,
+      objectApiName,
+      field: {
+        name: field.name,
+        label: field.label || field.name,
+        type: field.type,
+        updateable: Boolean(field.updateable),
+        nillable: Boolean(field.nillable),
+        length: field.length || null,
+        picklistValues: Array.isArray(field.picklistValues)
+          ? field.picklistValues
+              .filter((entry) => entry && entry.active !== false)
+              .map((entry) => ({
+                label: entry.label || entry.value,
+                value: entry.value
+              }))
+          : []
+      }
     };
   }
 
   async function resolveObjectFromRecordPrefix(apiVersion, recordId) {
     const prefix = recordId.slice(0, 3);
-    const describe = await attempt("Global object describe", () => apiFetch(`/services/data/v${apiVersion}/sobjects/`));
+    const describe = await apiFetch(`/services/data/v${apiVersion}/sobjects/`);
     const match = describe && Array.isArray(describe.sobjects)
       ? describe.sobjects.find((object) => object.keyPrefix === prefix)
       : null;
     return match && match.name || null;
   }
 
-  async function resolveRecordType(apiVersion, parsedPage, objectInfo) {
-    if (!parsedPage.recordId || !parsedPage.objectApiName) {
-      return {
-        id: null,
-        name: "Not on a record page",
-        developerName: null,
-        source: "URL context"
-      };
-    }
+  function findField(fields, context) {
+    const candidates = candidateNames(context);
+    const updateableFields = fields.filter((field) => field && field.updateable);
+    const allFields = updateableFields.length ? updateableFields : fields;
 
-    let recordTypeId = null;
-    const fields = encodeURIComponent(`${parsedPage.objectApiName}.RecordTypeId`);
-    const uiRecord = await attempt(
-      "UI API record type field",
-      () => apiFetch(`/services/data/v${apiVersion}/ui-api/records/${encodeURIComponent(parsedPage.recordId)}?fields=${fields}`)
-    );
-
-    if (uiRecord && uiRecord.fields && uiRecord.fields.RecordTypeId) {
-      recordTypeId = uiRecord.fields.RecordTypeId.value || null;
-    }
-
-    if (!recordTypeId && isSafeObjectApiName(parsedPage.objectApiName)) {
-      const soql = [
-        "SELECT RecordTypeId",
-        `FROM ${parsedPage.objectApiName}`,
-        `WHERE Id = '${soqlString(parsedPage.recordId)}'`,
-        "LIMIT 1"
-      ].join(" ");
-      const response = await attempt("Record type SOQL fallback", () => query(apiVersion, soql));
-      const record = response && response.records && response.records[0];
-      recordTypeId = record && record.RecordTypeId || null;
-    }
-
-    if (recordTypeId && objectInfo && objectInfo.recordTypeInfos && objectInfo.recordTypeInfos[recordTypeId]) {
-      const recordTypeInfo = objectInfo.recordTypeInfos[recordTypeId];
-      return {
-        id: recordTypeId,
-        name: recordTypeInfo.name || recordTypeInfo.developerName || recordTypeId,
-        developerName: recordTypeInfo.developerName || null,
-        source: "UI API object info"
-      };
-    }
-
-    if (!recordTypeId && objectInfo && objectInfo.recordTypeInfos) {
-      const recordTypes = Object.values(objectInfo.recordTypeInfos);
-      const master = recordTypes.find((recordTypeInfo) => recordTypeInfo.master);
-      if (master) {
-        return {
-          id: master.recordTypeId || null,
-          name: master.name || "Master",
-          developerName: master.developerName || "Master",
-          source: "UI API object info"
-        };
+    for (const candidate of candidates) {
+      const exactName = allFields.find((field) => lower(field.name) === lower(candidate));
+      if (exactName) {
+        return exactName;
       }
     }
 
-    return {
-      id: recordTypeId,
-      name: recordTypeId ? recordTypeId : "Unavailable",
-      developerName: null,
-      source: recordTypeId ? "RecordTypeId field" : "Record type was not available for this object"
-    };
+    for (const candidate of candidates) {
+      const exactLabel = allFields.find((field) => lower(field.label) === lower(candidate));
+      if (exactLabel) {
+        return exactLabel;
+      }
+    }
+
+    const normalizedCandidates = candidates.map((candidate) => normalizeLabel(candidate)).filter(Boolean);
+    for (const candidate of normalizedCandidates) {
+      const normalizedLabel = allFields.find((field) => normalizeLabel(field.label) === candidate);
+      if (normalizedLabel) {
+        return normalizedLabel;
+      }
+    }
+
+    for (const candidate of normalizedCandidates) {
+      const normalizedName = allFields.find((field) => normalizeLabel(field.name) === candidate);
+      if (normalizedName) {
+        return normalizedName;
+      }
+    }
+
+    return null;
   }
 
-  async function resolveCurrentApp(apiVersion, parsedPage) {
-    const appKey = parsedPage.appKey || appKeyFromNavigationLinks();
-    const domName = appNameFromDom();
+  function candidateNames(context) {
+    const raw = [
+      context.fieldApiName,
+      context.fieldKey,
+      context.columnLabel,
+      context.headerText,
+      context.ariaLabel
+    ];
+    const candidates = [];
 
-    if (appKey) {
-      const conditions = [
-        `DurableId = '${soqlString(appKey)}'`,
-        `DeveloperName = '${soqlString(appKey)}'`
-      ];
-      if (appKey.startsWith("standard__")) {
-        conditions.push(`DeveloperName = '${soqlString(appKey.replace(/^standard__/, ""))}'`);
-      }
-      if (isSalesforceId(appKey)) {
-        conditions.push(`Id = '${soqlString(appKey)}'`);
+    for (const value of raw) {
+      if (!value || typeof value !== "string") {
+        continue;
       }
 
-      const soql = [
-        "SELECT Id, DurableId, DeveloperName, Label",
-        "FROM AppDefinition",
-        `WHERE ${conditions.join(" OR ")}`,
-        "LIMIT 1"
-      ].join(" ");
-      const response = await attempt("Tooling AppDefinition", () => toolingQuery(apiVersion, soql));
-      const record = response && response.records && response.records[0];
-      if (record) {
-        return {
-          id: record.Id || null,
-          name: record.Label || record.DeveloperName || record.DurableId,
-          developerName: record.DeveloperName || null,
-          durableId: record.DurableId || null,
-          source: "Tooling API AppDefinition"
-        };
+      const cleaned = cleanColumnLabel(value);
+      if (cleaned) {
+        candidates.push(cleaned);
+      }
+
+      if (value.includes(".")) {
+        const parts = value.split(".").map((part) => cleanColumnLabel(part)).filter(Boolean);
+        candidates.push(parts[parts.length - 1]);
+      }
+
+      if (value.includes(":")) {
+        const parts = value.split(":").map((part) => cleanColumnLabel(part)).filter(Boolean);
+        candidates.push(parts[parts.length - 1]);
       }
     }
 
-    if (domName) {
-      return {
-        id: null,
-        name: domName,
-        developerName: null,
-        durableId: appKey || null,
-        source: "Lightning navigation DOM"
-      };
-    }
-
-    return {
-      id: null,
-      name: appKey || "Unavailable",
-      developerName: null,
-      durableId: appKey || null,
-      source: appKey ? "Lightning URL app key" : "No current app marker found"
-    };
+    return [...new Set(candidates.filter(Boolean))];
   }
 
-  async function resolvePageLayout(apiVersion, parsedPage, user, recordType) {
-    if (!parsedPage.objectApiName || !user || !user.profileId) {
-      return {
-        id: null,
-        name: "Unavailable",
-        source: "Need an object and profile to resolve layout assignment"
-      };
-    }
-
-    const recordTypeCondition = recordType && recordType.id
-      ? `RecordTypeId = '${soqlString(recordType.id)}'`
-      : "RecordTypeId = null";
-    const assignmentQuery = [
-      "SELECT Id, LayoutId, Layout.Name, ProfileId, RecordTypeId, TableEnumOrId",
-      "FROM ProfileLayout",
-      `WHERE ProfileId = '${soqlString(user.profileId)}'`,
-      `AND TableEnumOrId = '${soqlString(parsedPage.objectApiName)}'`,
-      `AND ${recordTypeCondition}`,
-      "LIMIT 1"
-    ].join(" ");
-
-    let response = await attempt("Tooling ProfileLayout assignment", () => toolingQuery(apiVersion, assignmentQuery));
-    let assignment = response && response.records && response.records[0];
-
-    if (!assignment && recordType && recordType.id) {
-      const fallbackQuery = [
-        "SELECT Id, LayoutId, Layout.Name, ProfileId, RecordTypeId, TableEnumOrId",
-        "FROM ProfileLayout",
-        `WHERE ProfileId = '${soqlString(user.profileId)}'`,
-        `AND TableEnumOrId = '${soqlString(parsedPage.objectApiName)}'`,
-        "AND RecordTypeId = null",
-        "LIMIT 1"
-      ].join(" ");
-      response = await attempt("Tooling default ProfileLayout assignment", () => toolingQuery(apiVersion, fallbackQuery));
-      assignment = response && response.records && response.records[0];
-    }
-
-    if (assignment) {
-      return {
-        id: assignment.LayoutId || assignment.Id || null,
-        name: assignment.Layout && assignment.Layout.Name || assignment.LayoutId || "Assigned layout",
-        source: "Tooling API ProfileLayout assignment"
-      };
-    }
-
-    const recordTypeParam = recordType && recordType.id ? `&recordTypeId=${encodeURIComponent(recordType.id)}` : "";
-    const layout = await attempt(
-      "UI API layout fallback",
-      () => apiFetch(`/services/data/v${apiVersion}/ui-api/layout/${encodeURIComponent(parsedPage.objectApiName)}/Full/View?formFactor=Large${recordTypeParam}`)
-    );
-
-    if (layout) {
-      return {
-        id: layout.id || null,
-        name: layout.name || layout.fullName || "Resolved by UI API",
-        source: "UI API layout fallback"
-      };
-    }
-
-    return {
-      id: null,
-      name: "Unavailable",
-      source: "No layout assignment was returned"
-    };
+  function cleanColumnLabel(value) {
+    return String(value || "")
+      .replace(/\b(sorted|ascending|descending|editable|read only|read-only)\b/gi, " ")
+      .replace(/\b(row|column)\s+\d+\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^[*:.\-\s]+|[*:.\-\s]+$/g, "");
   }
 
-  async function apiFetch(path) {
+  function normalizeLabel(value) {
+    return cleanColumnLabel(value)
+      .toLowerCase()
+      .replace(/__c$/i, "")
+      .replace(/[^a-z0-9]+/g, "");
+  }
+
+  function fieldNotFoundMessage(objectApiName, context, fields) {
+    const candidates = candidateNames(context);
+    const examples = fields
+      .filter((field) => field && field.updateable)
+      .slice(0, 8)
+      .map((field) => `${field.label || field.name} (${field.name})`)
+      .join(", ");
+
+    return [
+      `Could not match column "${candidates[0] || "unknown"}" to an updateable ${objectApiName} field.`,
+      examples ? `Examples of updateable fields: ${examples}.` : ""
+    ].filter(Boolean).join(" ");
+  }
+
+  function parseFieldValue(rawValue, field) {
+    const value = rawValue == null ? "" : String(rawValue).trim();
+    if (value === "") {
+      if (!field.nillable) {
+        throw new Error(`${field.label || field.name} is required and cannot be blank.`);
+      }
+      return null;
+    }
+
+    if (field.type === "boolean") {
+      if (/^(true|yes|y|1|checked)$/i.test(value)) {
+        return true;
+      }
+      if (/^(false|no|n|0|unchecked)$/i.test(value)) {
+        return false;
+      }
+      throw new Error(`${field.label || field.name} expects true or false.`);
+    }
+
+    if (["currency", "double", "percent"].includes(field.type)) {
+      const numeric = Number(value.replace(/[$,%\s]/g, "").replace(/,/g, ""));
+      if (!Number.isFinite(numeric)) {
+        throw new Error(`${field.label || field.name} expects a number.`);
+      }
+      return numeric;
+    }
+
+    if (["int", "long"].includes(field.type)) {
+      const integer = Number.parseInt(value.replace(/[,\s]/g, ""), 10);
+      if (!Number.isFinite(integer)) {
+        throw new Error(`${field.label || field.name} expects a whole number.`);
+      }
+      return integer;
+    }
+
+    if (field.type === "date") {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        throw new Error(`${field.label || field.name} expects a date in YYYY-MM-DD format.`);
+      }
+      return value;
+    }
+
+    if (field.type === "datetime") {
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new Error(`${field.label || field.name} expects a valid date and time.`);
+      }
+      return parsed.toISOString();
+    }
+
+    if (field.type === "reference" && !/^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value)) {
+      throw new Error(`${field.label || field.name} expects a Salesforce record ID.`);
+    }
+
+    return value;
+  }
+
+  async function apiFetch(path, options = {}) {
     const response = await fetch(path, {
-      method: "GET",
+      method: options.method || "GET",
       credentials: "same-origin",
       headers: {
-        "Accept": "application/json"
-      }
+        "Accept": "application/json",
+        ...options.headers
+      },
+      body: options.body
     });
+
     const text = await response.text();
     let body = null;
 
@@ -430,14 +403,6 @@ async function collectSalesforcePerspectiveInPage() {
     return body;
   }
 
-  async function query(apiVersion, soql) {
-    return apiFetch(`/services/data/v${apiVersion}/query/?q=${encodeURIComponent(soql)}`);
-  }
-
-  async function toolingQuery(apiVersion, soql) {
-    return apiFetch(`/services/data/v${apiVersion}/tooling/query/?q=${encodeURIComponent(soql)}`);
-  }
-
   async function attempt(label, task) {
     try {
       return await task();
@@ -447,147 +412,12 @@ async function collectSalesforcePerspectiveInPage() {
     }
   }
 
-  function parseSalesforcePage() {
-    const url = new URL(window.location.href);
-    const segments = url.pathname.split("/").filter(Boolean).map((segment) => safeDecode(segment));
-    const result = {
-      recordId: null,
-      objectApiName: null,
-      appKey: null,
-      pageType: "unknown"
-    };
-
-    const lightningIndex = segments.indexOf("lightning");
-    if (lightningIndex >= 0) {
-      readLightningSegments(segments.slice(lightningIndex + 1), result);
-    }
-
-    if (!result.recordId) {
-      const classicRecordMatch = url.pathname.match(/^\/([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)(?:[/?#]|$)/);
-      if (classicRecordMatch) {
-        result.recordId = classicRecordMatch[1];
-        result.pageType = "classicRecord";
-      }
-    }
-
-    if (!result.recordId) {
-      const decodedLocation = safeDecode(`${url.pathname}${url.search}${url.hash}`);
-      const recordMatch = decodedLocation.match(/\b([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)\b/);
-      if (recordMatch) {
-        result.recordId = recordMatch[1];
-        result.pageType = result.pageType === "unknown" ? "recordFromUrl" : result.pageType;
-      }
-    }
-
-    return result;
+  function normalizeId(value) {
+    return typeof value === "string" && /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value) ? value : null;
   }
 
-  function readLightningSegments(segments, result) {
-    if (!segments.length) {
-      return;
-    }
-
-    if (segments[0] === "app") {
-      result.appKey = segments[1] || null;
-      readLightningSegments(segments.slice(2), result);
-      return;
-    }
-
-    if (segments[0] === "r") {
-      result.objectApiName = segments[1] || result.objectApiName;
-      result.recordId = isSalesforceId(segments[2]) ? segments[2] : result.recordId;
-      result.pageType = "record";
-      return;
-    }
-
-    if (segments[0] === "o") {
-      result.objectApiName = segments[1] || result.objectApiName;
-      result.pageType = "object";
-      return;
-    }
-
-    if (segments[0] === "setup" && segments[1] === "ObjectManager") {
-      result.objectApiName = segments[2] || result.objectApiName;
-      result.pageType = "setupObjectManager";
-    }
-  }
-
-  function getUserIdFromPageGlobals() {
-    const candidates = [];
-
-    try {
-      if (window.$A && typeof window.$A.get === "function") {
-        candidates.push(window.$A.get("$SObjectType.CurrentUser.Id"));
-      }
-    } catch (_error) {
-      // Ignore framework access errors from partially loaded Lightning pages.
-    }
-
-    try {
-      candidates.push(window.UserContext && window.UserContext.userId);
-      candidates.push(window.SfdcApp && window.SfdcApp.userId);
-      candidates.push(window.sfdcPage && window.sfdcPage.userId);
-    } catch (_error) {
-      // Ignore page-global access errors.
-    }
-
-    return candidates.find((candidate) => isSalesforceId(candidate)) || null;
-  }
-
-  function appNameFromDom() {
-    const selectors = [
-      ".slds-context-bar__app-name .slds-truncate",
-      ".slds-context-bar__app-name",
-      "one-app-nav-bar a[href*='/lightning/app/'] .slds-truncate",
-      "one-app-nav-bar a[href*='/lightning/app/']",
-      "a.slds-context-bar__label-action[href*='/lightning/app/']"
-    ];
-
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      const text = element && cleanText(element.textContent || element.getAttribute("title"));
-      if (text && text.toLowerCase() !== "app launcher") {
-        return text;
-      }
-    }
-
-    return null;
-  }
-
-  function appKeyFromNavigationLinks() {
-    const link = document.querySelector("a[href*='/lightning/app/']");
-    if (!link) {
-      return null;
-    }
-
-    try {
-      const url = new URL(link.href, window.location.origin);
-      const segments = url.pathname.split("/").filter(Boolean).map((segment) => safeDecode(segment));
-      const appIndex = segments.indexOf("app");
-      return appIndex >= 0 ? segments[appIndex + 1] || null : null;
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  function idFromIdentityUrl(value) {
-    if (!value) {
-      return null;
-    }
-    const match = String(value).match(/\/([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)$/);
-    return match ? match[1] : null;
-  }
-
-  function isSalesforceId(value) {
-    return typeof value === "string" && /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value);
-  }
-
-  function isSafeObjectApiName(value) {
-    return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(value);
-  }
-
-  function soqlString(value) {
-    return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  function lower(value) {
+    return String(value || "").toLowerCase();
   }
 
   function salesforceErrorMessage(body) {
@@ -598,17 +428,5 @@ async function collectSalesforcePerspectiveInPage() {
       return body.message || body.error_description || body.error || JSON.stringify(body);
     }
     return body || "No response body";
-  }
-
-  function safeDecode(value) {
-    try {
-      return decodeURIComponent(value);
-    } catch (_error) {
-      return value;
-    }
-  }
-
-  function cleanText(value) {
-    return String(value || "").replace(/\s+/g, " ").trim();
   }
 }

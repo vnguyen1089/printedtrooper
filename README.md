@@ -1,18 +1,22 @@
-# Salesforce 2 Perspective
+# Salesforce Inline Editor
 
-Salesforce 2 Perspective is a Manifest V3 Chrome extension that opens a right-side panel on Salesforce pages. The panel shows the current:
+Salesforce Inline Editor is a Manifest V3 Chrome extension that adds inline editing to Salesforce Lightning list views and report detail rows.
 
-- Record type
-- Profile
-- App
-- Role
-- Page layout
+When the extension is enabled, Salesforce table cells that expose both a record ID and a column label are highlighted. Double-click a highlighted cell to edit the value, then click **Save** to update Salesforce through the REST API using your current browser session.
 
 ## How it works
 
-The content script only owns the side-panel UI. When you click the extension icon, the background service worker toggles the panel and handles collection requests.
+The content script scans Salesforce grids, list tables, and report result tables for:
 
-Salesforce API calls are executed by the background service worker through `chrome.scripting.executeScript` with `world: "MAIN"`. That injected function runs inside the Salesforce page context, so calls to `/services/data/...` are same-origin and use the browser's existing Salesforce session.
+- a row-level Salesforce record ID
+- a column label, field key, or header text
+
+When you edit a cell, the background service worker executes a small API bridge in the Salesforce page context with `chrome.scripting.executeScript` and `world: "MAIN"`. That bridge:
+
+1. reads the latest Salesforce REST API version
+2. resolves the record's object from the page, row link, or record ID prefix
+3. matches the column label/key to an updateable field from object describe metadata
+4. PATCHes `/services/data/vXX.X/sobjects/{ObjectApiName}/{RecordId}`
 
 ## Install locally
 
@@ -20,10 +24,14 @@ Salesforce API calls are executed by the background service worker through `chro
 2. Enable **Developer mode**.
 3. Click **Load unpacked**.
 4. Select this repository folder.
-5. Open a Salesforce Lightning or Classic page and click the **Salesforce 2 Perspective** extension icon.
+5. Open a Salesforce Lightning list view or report.
+6. Double-click a highlighted cell to edit it inline.
+
+Click the extension icon to toggle the inline-edit layer on or off for the current tab.
 
 ## Notes
 
-- The page layout lookup uses the Tooling API `ProfileLayout` assignment when Salesforce allows it, then falls back to UI API layout metadata.
-- App detection uses the Lightning URL or navigation DOM first, then attempts to enrich that value with Tooling API `AppDefinition`.
-- If your Salesforce permissions block a metadata endpoint, the panel still displays the values it can read and lists the blocked endpoint under **Notes**.
+- Salesforce permissions, field-level security, validation rules, required fields, formulas, rollups, and record locks still apply. If Salesforce rejects an update, the extension shows the API error.
+- Report rows must expose a concrete record link or row record ID. Summary, subtotal, grand total, bucket, joined-report, and calculated report cells may not be editable because they do not map to one updateable field on one record.
+- Related-object report columns are resolved from the row/cell record context that Salesforce exposes in the DOM. If Salesforce does not expose enough context, the extension refuses to save rather than guessing.
+- The extension does not store Salesforce data or credentials. Requests use the active Salesforce session in the open tab.
