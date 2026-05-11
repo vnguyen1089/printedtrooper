@@ -17,11 +17,26 @@
     "action",
     "actions",
     "checkbox",
+    "createdby",
+    "createdbyid",
+    "createddate",
+    "createdon",
+    "lastmodifiedby",
+    "lastmodifiedbyid",
+    "lastmodifieddate",
+    "lastmodifiedon",
     "rowaction",
     "rowactions",
     "rownumber",
     "selectitem",
     "selection"
+  ]);
+  const NON_EDITABLE_OBJECTS = new Set([
+    "Dashboard",
+    "Document",
+    "Folder",
+    "ListView",
+    "Report"
   ]);
 
   let enabled = true;
@@ -426,9 +441,14 @@
       return null;
     }
 
+    const objectApiName = record.objectApiName || objectApiNameFromPageUrl();
+    if (isNonEditableObject(objectApiName)) {
+      return null;
+    }
+
     return {
       recordId: record.recordId,
-      objectApiName: record.objectApiName || objectApiNameFromPageUrl(),
+      objectApiName,
       fieldApiName: column.fieldApiName,
       fieldKey: column.fieldKey,
       columnLabel: column.columnLabel,
@@ -680,6 +700,10 @@
 
   function isIgnoredField(value) {
     return IGNORED_FIELD_KEYS.has(cleanText(value).toLowerCase().replace(/[^a-z0-9]/g, ""));
+  }
+
+  function isNonEditableObject(value) {
+    return NON_EDITABLE_OBJECTS.has(cleanText(value));
   }
 
   function parseRecordUrl(value) {

@@ -139,8 +139,7 @@ async function createSalesforceApiClient(pageUrl, warnings) {
 
   for (const origin of origins) {
     try {
-      const sessionId = await sessionIdForOrigin(origin);
-      const versions = await fetchJsonFromOrigin(origin, "/services/data/", { sessionId });
+      const versions = await fetchJsonFromOrigin(origin, "/services/data/");
       if (!Array.isArray(versions) || versions.length === 0) {
         failures.push(`${origin}: /services/data/ returned no versions`);
         continue;
@@ -151,6 +150,25 @@ async function createSalesforceApiClient(pageUrl, warnings) {
         .filter(Boolean)
         .sort((left, right) => Number.parseFloat(right) - Number.parseFloat(left))[0] || "60.0";
 
+      const sessionIds = await candidateSessionIds(origin, pageUrl);
+      let authenticatedSessionId = null;
+      let authenticated = false;
+
+      for (const sessionId of sessionIds) {
+        try {
+          await verifyAuthenticatedRest(origin, version, sessionId);
+          authenticatedSessionId = sessionId;
+          authenticated = true;
+          break;
+        } catch (error) {
+          failures.push(`${origin}: authenticated probe failed${sessionId ? "" : " without bearer token"}: ${error.message || String(error)}`);
+        }
+      }
+
+      if (!authenticated) {
+        continue;
+      }
+
       if (failures.length) {
         warnings.push(`Skipped API hosts: ${failures.join("; ")}`);
       }
@@ -160,7 +178,7 @@ async function createSalesforceApiClient(pageUrl, warnings) {
         version,
         fetchJson: (path, options = {}) => fetchJsonFromOrigin(origin, path, {
           ...options,
-          sessionId
+          sessionId: authenticatedSessionId
         })
       };
     } catch (error) {
@@ -176,6 +194,31 @@ async function createSalesforceApiClient(pageUrl, warnings) {
   ].filter(Boolean).join(" "));
 }
 
+async function verifyAuthenticatedRest(origin, version, sessionId) {
+  await fetchJsonFromOrigin(origin, `/services/data/v${version}/limits`, { sessionId });
+}
+
+async function candidateSessionIds(origin, pageUrl) {
+  const pageHost = hostFromUrl(pageUrl);
+  const originCookie = await sessionIdForOrigin(origin);
+  const cookies = await chrome.cookies.getAll({ name: "sid" });
+  const cookieValues = cookies
+    .filter((cookie) => isSalesforceCookieDomain((cookie.domain || "").replace(/^\./, "").toLowerCase()))
+    .sort((left, right) => {
+      const leftDomain = (left.domain || "").replace(/^\./, "").toLowerCase();
+      const rightDomain = (right.domain || "").replace(/^\./, "").toLowerCase();
+      return hostScore(rightDomain, pageHost) - hostScore(leftDomain, pageHost);
+    })
+    .map((cookie) => cookie.value)
+    .filter(Boolean);
+
+  return uniqueValues([
+    originCookie,
+    ...cookieValues,
+    ""
+  ]);
+}
+
 async function candidateApiOrigins(pageUrl) {
   const fromUrl = candidateOriginsFromUrl(pageUrl);
   const fromCookies = await candidateOriginsFromCookies(pageUrl);
@@ -188,20 +231,7 @@ function candidateOriginsFromUrl(pageUrl) {
   try {
     const url = new URL(pageUrl);
     const hostname = url.hostname.toLowerCase();
-    origins.push(`https://${hostname}`);
-
-    if (hostname.endsWith(".lightning.force.com")) {
-      origins.push(`https://${hostname.replace(/\.lightning\.force\.com$/, ".my.salesforce.com")}`);
-      origins.push(`https://${hostname.replace(/\.lightning\.force\.com$/, ".salesforce.com")}`);
-    }
-
-    if (hostname.endsWith(".visualforce.com")) {
-      origins.push(`https://${hostname.replace(/\.visualforce\.com$/, ".my.salesforce.com")}`);
-    }
-
-    if (hostname.endsWith(".my.site.com")) {
-      origins.push(`https://${hostname.replace(/\.my\.site\.com$/, ".my.salesforce.com")}`);
-    }
+    origins.push(...apiHostsForPageHost(hostname).map((host) => `https://${host}`));
   } catch (_error) {
     // Ignore malformed tab URLs. Cookie-derived candidates may still work.
   }
@@ -218,7 +248,38 @@ async function candidateOriginsFromCookies(pageUrl) {
 
   return salesforceCookieHosts
     .sort((left, right) => hostScore(right, pageHost) - hostScore(left, pageHost))
+    .flatMap((host) => apiHostsForPageHost(host))
     .map((host) => `https://${host}`);
+}
+
+function apiHostsForPageHost(hostname) {
+  if (!hostname) {
+    return [];
+  }
+
+  if (hostname.endsWith(".lightning.force.com")) {
+    return [
+      hostname.replace(/\.lightning\.force\.com$/, ".my.salesforce.com"),
+      hostname.replace(/\.lightning\.force\.com$/, ".salesforce.com"),
+      hostname
+    ];
+  }
+
+  if (hostname.endsWith(".visualforce.com")) {
+    return [
+      hostname.replace(/\.visualforce\.com$/, ".my.salesforce.com"),
+      hostname
+    ];
+  }
+
+  if (hostname.endsWith(".my.site.com")) {
+    return [
+      hostname.replace(/\.my\.site\.com$/, ".my.salesforce.com"),
+      hostname
+    ];
+  }
+
+  return [hostname];
 }
 
 function isSalesforceCookieDomain(domain) {
@@ -278,6 +339,21 @@ function uniqueOrigins(origins) {
     }
     seen.add(origin);
     unique.push(origin);
+  }
+
+  return unique;
+}
+
+function uniqueValues(values) {
+  const seen = new Set();
+  const unique = [];
+
+  for (const value of values) {
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    unique.push(value);
   }
 
   return unique;
