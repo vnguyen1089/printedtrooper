@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Salesforce 2 Perspective",
+  "version": "1.0.0",
+  "description": "Shows the Salesforce record type, profile, app, role, and page layout for the current page.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.salesforce.com/*",
+    "https://*.force.com/*",
+    "https://*.lightning.force.com/*",
+    "https://*.visualforce.com/*",
+    "https://*.salesforce-sites.com/*",
+    "https://*.my.site.com/*"
+  ],
+  "action": {
+    "default_title": "Salesforce 2 Perspective"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.salesforce.com/*",
+        "https://*.force.com/*",
+        "https://*.lightning.force.com/*",
+        "https://*.visualforce.com/*",
+        "https://*.salesforce-sites.com/*",
+        "https://*.my.site.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
