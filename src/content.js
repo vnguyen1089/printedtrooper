@@ -222,10 +222,12 @@
   }
 
   function warningsList(warnings) {
-    const section = document.createElement("section");
+    const section = document.createElement("details");
     section.className = "sf2p-warnings";
     const title = document.createElement("h2");
-    title.textContent = "Notes";
+    title.textContent = "Diagnostics";
+    const summary = document.createElement("summary");
+    summary.textContent = "Show diagnostics";
     const list = document.createElement("ul");
 
     for (const warning of warnings.slice(0, 8)) {
@@ -240,7 +242,7 @@
       list.append(item);
     }
 
-    section.append(title, list);
+    section.append(summary, title, list);
     return section;
   }
 
@@ -451,6 +453,17 @@
       .sf2p-warnings {
         background: #fff8e6;
         border-color: #f9e3b6;
+      }
+
+      .sf2p-warnings summary {
+        color: #5c3b00;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .sf2p-warnings h2 {
+        margin-top: 10px;
       }
 
       .sf2p-warnings ul {

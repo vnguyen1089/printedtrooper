@@ -1,5 +1,6 @@
 const SALESFORCE_HOST_SUFFIXES = [
   ".salesforce.com",
+  ".my.salesforce.com",
   ".force.com",
   ".lightning.force.com",
   ".visualforce.com",
@@ -91,7 +92,454 @@ async function collectContext(tabId) {
     throw new Error(result.result.error || "Salesforce page context collection failed.");
   }
 
-  return result.result;
+  return enrichContextFromBackground(result.result);
+}
+
+async function enrichContextFromBackground(pageContext) {
+  if (!needsBackgroundEnrichment(pageContext)) {
+    return pageContext;
+  }
+
+  const warnings = [...(pageContext.warnings || [])];
+
+  try {
+    const apiClient = await createSalesforceApiClient(pageContext.currentUrl);
+    if (!apiClient) {
+      warnings.push("Background API fallback: no Salesforce API session cookie was available for the org host.");
+      return withWarnings(pageContext, summarizeWarnings(warnings));
+    }
+
+    const apiVersion = await apiClient.getLatestApiVersion(pageContext.org && pageContext.org.apiVersion);
+    const parsedPage = {
+      recordId: pageContext.record && pageContext.record.id || null,
+      objectApiName: pageContext.record && pageContext.record.objectApiName || null
+    };
+
+    const user = await resolveUserFromApi(apiClient, apiVersion, pageContext.user, warnings);
+    const objectInfo = parsedPage.objectApiName
+      ? await attemptBackground(warnings, "Background object info", () => apiClient.fetchJson(`/services/data/v${apiVersion}/ui-api/object-info/${encodeURIComponent(parsedPage.objectApiName)}`))
+      : null;
+    const recordType = await resolveRecordTypeFromApi(apiClient, apiVersion, parsedPage, objectInfo, pageContext.recordType, warnings);
+    const app = await resolveAppFromApi(apiClient, apiVersion, pageContext.app, warnings);
+    const pageLayout = await resolvePageLayoutFromApi(apiClient, apiVersion, parsedPage, user, recordType, pageContext.pageLayout, warnings);
+
+    return {
+      ...pageContext,
+      org: {
+        ...(pageContext.org || {}),
+        apiVersion,
+        apiHost: apiClient.origin
+      },
+      user,
+      app,
+      recordType,
+      pageLayout,
+      warnings: summarizeWarnings(warnings)
+    };
+  } catch (error) {
+    warnings.push(`Background API fallback: ${error.message || String(error)}`);
+    return withWarnings(pageContext, summarizeWarnings(warnings));
+  }
+}
+
+function needsBackgroundEnrichment(context) {
+  const values = [
+    context.recordType && context.recordType.name,
+    context.user && context.user.profileName,
+    context.app && context.app.name,
+    context.user && context.user.roleName,
+    context.pageLayout && context.pageLayout.name
+  ];
+  return values.some((value) => !value || value === "Unavailable");
+}
+
+async function createSalesforceApiClient(currentUrl) {
+  const origins = apiOriginsForUrl(currentUrl);
+
+  for (const origin of origins) {
+    const token = await readSalesforceSessionToken(origin);
+    const candidates = token ? [token, null] : [null];
+
+    for (const candidateToken of candidates) {
+      const client = new SalesforceApiClient(origin, candidateToken);
+      if (await client.canAuthenticate()) {
+        return client;
+      }
+    }
+  }
+
+  return null;
+}
+
+function apiOriginsForUrl(currentUrl) {
+  const origins = [];
+
+  try {
+    const url = new URL(currentUrl);
+    addOrigin(origins, url.origin);
+
+    const hostname = url.hostname.toLowerCase();
+    if (hostname.endsWith(".lightning.force.com")) {
+      addOrigin(origins, `https://${hostname.replace(/\.lightning\.force\.com$/, ".my.salesforce.com")}`);
+    }
+    if (hostname.endsWith(".my.salesforce.com")) {
+      addOrigin(origins, url.origin);
+    }
+    if (hostname.endsWith(".salesforce.com") && !hostname.endsWith(".my.salesforce.com")) {
+      addOrigin(origins, url.origin);
+    }
+  } catch (_error) {
+    // The caller handles the lack of a usable API origin.
+  }
+
+  return origins;
+}
+
+function addOrigin(origins, origin) {
+  if (origin && !origins.includes(origin)) {
+    origins.push(origin);
+  }
+}
+
+async function readSalesforceSessionToken(origin) {
+  try {
+    const cookies = await chrome.cookies.getAll({ url: origin });
+    const sid = cookies.find((cookie) => cookie.name === "sid")
+      || cookies.find((cookie) => cookie.name.toLowerCase().startsWith("sid"));
+    return sid && sid.value || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+class SalesforceApiClient {
+  constructor(origin, token) {
+    this.origin = origin;
+    this.token = token;
+  }
+
+  async canAuthenticate() {
+    try {
+      await this.fetchJson("/services/oauth2/userinfo");
+      return true;
+    } catch (_error) {
+      try {
+        const response = await this.query("60.0", "SELECT Id FROM User LIMIT 1");
+        return Boolean(response && Array.isArray(response.records));
+      } catch (__error) {
+        return false;
+      }
+    }
+  }
+
+  async getLatestApiVersion(fallbackVersion) {
+    const versions = await this.fetchJson("/services/data/");
+    if (!Array.isArray(versions) || versions.length === 0) {
+      return fallbackVersion || "60.0";
+    }
+
+    return versions
+      .map((version) => version.version)
+      .filter(Boolean)
+      .sort((left, right) => Number.parseFloat(right) - Number.parseFloat(left))[0] || fallbackVersion || "60.0";
+  }
+
+  async query(apiVersion, soql) {
+    return this.fetchJson(`/services/data/v${apiVersion}/query/?q=${encodeURIComponent(soql)}`);
+  }
+
+  async toolingQuery(apiVersion, soql) {
+    return this.fetchJson(`/services/data/v${apiVersion}/tooling/query/?q=${encodeURIComponent(soql)}`);
+  }
+
+  async fetchJson(path) {
+    const headers = {
+      "Accept": "application/json"
+    };
+
+    if (this.token) {
+      headers.Authorization = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(`${this.origin}${path}`, {
+      method: "GET",
+      credentials: "include",
+      headers
+    });
+    const text = await response.text();
+    const body = parseJsonBody(text);
+
+    if (!response.ok) {
+      throw new Error(`${path} returned ${response.status}: ${salesforceErrorMessageForBackground(body)}`);
+    }
+
+    return body;
+  }
+}
+
+async function resolveUserFromApi(apiClient, apiVersion, existingUser, warnings) {
+  const userId = existingUser && existingUser.id;
+  if (!userId || !isSalesforceIdForBackground(userId)) {
+    return existingUser || unavailableUser("No current user id was found in the Salesforce page.");
+  }
+
+  const soql = [
+    "SELECT Id, Name, ProfileId, Profile.Name, UserRoleId, UserRole.Name",
+    "FROM User",
+    `WHERE Id = '${soqlStringForBackground(userId)}'`,
+    "LIMIT 1"
+  ].join(" ");
+  const response = await attemptBackground(warnings, "Background user profile and role", () => apiClient.query(apiVersion, soql));
+  const record = response && response.records && response.records[0];
+
+  if (!record) {
+    return existingUser || unavailableUser("Background User query returned no rows.");
+  }
+
+  return {
+    id: record.Id,
+    name: record.Name,
+    profileId: record.ProfileId || null,
+    profileName: record.Profile && record.Profile.Name || "Unavailable",
+    roleId: record.UserRoleId || null,
+    roleName: record.UserRole && record.UserRole.Name || "No role assigned",
+    source: "Background REST SOQL User query"
+  };
+}
+
+async function resolveRecordTypeFromApi(apiClient, apiVersion, parsedPage, objectInfo, existingRecordType, warnings) {
+  if (!parsedPage.recordId || !parsedPage.objectApiName) {
+    return existingRecordType;
+  }
+
+  let recordTypeId = existingRecordType && existingRecordType.id || null;
+
+  if (!recordTypeId) {
+    const fields = encodeURIComponent(`${parsedPage.objectApiName}.RecordTypeId`);
+    const uiRecord = await attemptBackground(
+      warnings,
+      "Background UI API record type field",
+      () => apiClient.fetchJson(`/services/data/v${apiVersion}/ui-api/records/${encodeURIComponent(parsedPage.recordId)}?fields=${fields}`)
+    );
+
+    if (uiRecord && uiRecord.fields && uiRecord.fields.RecordTypeId) {
+      recordTypeId = uiRecord.fields.RecordTypeId.value || null;
+    }
+  }
+
+  if (!recordTypeId && isSafeObjectApiNameForBackground(parsedPage.objectApiName)) {
+    const soql = [
+      "SELECT RecordTypeId",
+      `FROM ${parsedPage.objectApiName}`,
+      `WHERE Id = '${soqlStringForBackground(parsedPage.recordId)}'`,
+      "LIMIT 1"
+    ].join(" ");
+    const response = await attemptBackground(warnings, "Background record type SOQL fallback", () => apiClient.query(apiVersion, soql));
+    const record = response && response.records && response.records[0];
+    recordTypeId = record && record.RecordTypeId || null;
+  }
+
+  if (recordTypeId && objectInfo && objectInfo.recordTypeInfos && objectInfo.recordTypeInfos[recordTypeId]) {
+    const recordTypeInfo = objectInfo.recordTypeInfos[recordTypeId];
+    return {
+      id: recordTypeId,
+      name: recordTypeInfo.name || recordTypeInfo.developerName || recordTypeId,
+      developerName: recordTypeInfo.developerName || null,
+      source: "Background UI API object info"
+    };
+  }
+
+  if (!recordTypeId && objectInfo && objectInfo.recordTypeInfos) {
+    const master = Object.values(objectInfo.recordTypeInfos).find((recordTypeInfo) => recordTypeInfo.master);
+    if (master) {
+      return {
+        id: master.recordTypeId || null,
+        name: master.name || "Master",
+        developerName: master.developerName || "Master",
+        source: "Background UI API object info"
+      };
+    }
+  }
+
+  return existingRecordType || {
+    id: recordTypeId,
+    name: recordTypeId || "Unavailable",
+    developerName: null,
+    source: recordTypeId ? "Background RecordTypeId field" : "Record type was not available"
+  };
+}
+
+async function resolveAppFromApi(apiClient, apiVersion, existingApp, warnings) {
+  const appKey = existingApp && (existingApp.durableId || existingApp.developerName || existingApp.id);
+  if (!appKey || existingApp && existingApp.name && existingApp.name !== "Unavailable") {
+    return existingApp;
+  }
+
+  const conditions = [
+    `DurableId = '${soqlStringForBackground(appKey)}'`,
+    `DeveloperName = '${soqlStringForBackground(appKey)}'`
+  ];
+  if (appKey.startsWith("standard__")) {
+    conditions.push(`DeveloperName = '${soqlStringForBackground(appKey.replace(/^standard__/, ""))}'`);
+  }
+  if (isSalesforceIdForBackground(appKey)) {
+    conditions.push(`Id = '${soqlStringForBackground(appKey)}'`);
+  }
+
+  const soql = [
+    "SELECT Id, DurableId, DeveloperName, Label",
+    "FROM AppDefinition",
+    `WHERE ${conditions.join(" OR ")}`,
+    "LIMIT 1"
+  ].join(" ");
+  const response = await attemptBackground(warnings, "Background Tooling AppDefinition", () => apiClient.toolingQuery(apiVersion, soql));
+  const record = response && response.records && response.records[0];
+
+  if (!record) {
+    return existingApp;
+  }
+
+  return {
+    id: record.Id || null,
+    name: record.Label || record.DeveloperName || record.DurableId,
+    developerName: record.DeveloperName || null,
+    durableId: record.DurableId || null,
+    source: "Background Tooling API AppDefinition"
+  };
+}
+
+async function resolvePageLayoutFromApi(apiClient, apiVersion, parsedPage, user, recordType, existingPageLayout, warnings) {
+  if (!parsedPage.objectApiName || !user || !user.profileId) {
+    return existingPageLayout;
+  }
+
+  const recordTypeCondition = recordType && recordType.id
+    ? `RecordTypeId = '${soqlStringForBackground(recordType.id)}'`
+    : "RecordTypeId = null";
+  const assignmentQuery = [
+    "SELECT Id, LayoutId, Layout.Name, ProfileId, RecordTypeId, TableEnumOrId",
+    "FROM ProfileLayout",
+    `WHERE ProfileId = '${soqlStringForBackground(user.profileId)}'`,
+    `AND TableEnumOrId = '${soqlStringForBackground(parsedPage.objectApiName)}'`,
+    `AND ${recordTypeCondition}`,
+    "LIMIT 1"
+  ].join(" ");
+  let response = await attemptBackground(warnings, "Background Tooling ProfileLayout assignment", () => apiClient.toolingQuery(apiVersion, assignmentQuery));
+  let assignment = response && response.records && response.records[0];
+
+  if (!assignment && recordType && recordType.id) {
+    const fallbackQuery = [
+      "SELECT Id, LayoutId, Layout.Name, ProfileId, RecordTypeId, TableEnumOrId",
+      "FROM ProfileLayout",
+      `WHERE ProfileId = '${soqlStringForBackground(user.profileId)}'`,
+      `AND TableEnumOrId = '${soqlStringForBackground(parsedPage.objectApiName)}'`,
+      "AND RecordTypeId = null",
+      "LIMIT 1"
+    ].join(" ");
+    response = await attemptBackground(warnings, "Background Tooling default ProfileLayout assignment", () => apiClient.toolingQuery(apiVersion, fallbackQuery));
+    assignment = response && response.records && response.records[0];
+  }
+
+  if (assignment) {
+    return {
+      id: assignment.LayoutId || assignment.Id || null,
+      name: assignment.Layout && assignment.Layout.Name || assignment.LayoutId || "Assigned layout",
+      source: "Background Tooling API ProfileLayout assignment"
+    };
+  }
+
+  const recordTypeParam = recordType && recordType.id ? `&recordTypeId=${encodeURIComponent(recordType.id)}` : "";
+  const layout = await attemptBackground(
+    warnings,
+    "Background UI API layout fallback",
+    () => apiClient.fetchJson(`/services/data/v${apiVersion}/ui-api/layout/${encodeURIComponent(parsedPage.objectApiName)}/Full/View?formFactor=Large${recordTypeParam}`)
+  );
+
+  if (layout) {
+    return {
+      id: layout.id || null,
+      name: layout.name || layout.fullName || "Resolved by UI API",
+      source: "Background UI API layout fallback"
+    };
+  }
+
+  return existingPageLayout;
+}
+
+async function attemptBackground(warnings, label, task) {
+  try {
+    return await task();
+  } catch (error) {
+    warnings.push(`${label}: ${error.message || String(error)}`);
+    return null;
+  }
+}
+
+function withWarnings(context, warnings) {
+  return {
+    ...context,
+    warnings
+  };
+}
+
+function summarizeWarnings(warnings) {
+  const unique = [...new Set(warnings.filter(Boolean))];
+  const sessionFailures = unique.filter((warning) => /Session expired or invalid|INVALID_SESSION_ID|Failed to fetch/i.test(warning));
+  const otherWarnings = unique.filter((warning) => !sessionFailures.includes(warning));
+
+  if (sessionFailures.length > 0) {
+    otherWarnings.push(
+      "Lightning REST session was not API-enabled, so Salesforce 2 Perspective tried the background API-host fallback."
+    );
+  }
+
+  return otherWarnings.slice(0, 10);
+}
+
+function unavailableUser(source) {
+  return {
+    id: null,
+    name: "Unavailable",
+    profileId: null,
+    profileName: "Unavailable",
+    roleId: null,
+    roleName: "Unavailable",
+    source
+  };
+}
+
+function parseJsonBody(text) {
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    return text;
+  }
+}
+
+function isSalesforceIdForBackground(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value);
+}
+
+function isSafeObjectApiNameForBackground(value) {
+  return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(value);
+}
+
+function soqlStringForBackground(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function salesforceErrorMessageForBackground(body) {
+  if (Array.isArray(body)) {
+    return body.map((entry) => entry && entry.message || JSON.stringify(entry)).join("; ");
+  }
+  if (body && typeof body === "object") {
+    return body.message || body.error_description || body.error || JSON.stringify(body);
+  }
+  return body || "No response body";
 }
 
 async function collectSalesforcePerspectiveInPage() {
@@ -163,7 +611,8 @@ async function collectSalesforcePerspectiveInPage() {
   }
 
   async function getCurrentUser(apiVersion) {
-    const pageUserId = getUserIdFromPageGlobals();
+    const pageUser = getUserFromPageGlobals();
+    const pageUserId = pageUser.id;
     const userInfo = await attempt("OAuth user info", () => apiFetch("/services/oauth2/userinfo"));
     const userId = pageUserId || userInfo && (userInfo.user_id || userInfo.userId || idFromIdentityUrl(userInfo.sub));
 
@@ -191,12 +640,14 @@ async function collectSalesforcePerspectiveInPage() {
     if (!record) {
       return {
         id: userId,
-        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
-        profileId: null,
-        profileName: "Unavailable",
-        roleId: null,
-        roleName: "Unavailable",
-        source: "Current user id; SOQL user lookup returned no rows"
+        name: pageUser.name || userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
+        profileId: pageUser.profileId || null,
+        profileName: pageUser.profileName || "Unavailable",
+        roleId: pageUser.roleId || null,
+        roleName: pageUser.roleName || "Unavailable",
+        source: pageUser.profileName || pageUser.roleName
+          ? "Lightning page current-user globals"
+          : "Current user id; SOQL user lookup returned no rows"
       };
     }
 
@@ -512,12 +963,25 @@ async function collectSalesforcePerspectiveInPage() {
     }
   }
 
-  function getUserIdFromPageGlobals() {
+  function getUserFromPageGlobals() {
     const candidates = [];
+    const values = {
+      id: null,
+      name: null,
+      profileId: null,
+      profileName: null,
+      roleId: null,
+      roleName: null
+    };
 
     try {
       if (window.$A && typeof window.$A.get === "function") {
         candidates.push(window.$A.get("$SObjectType.CurrentUser.Id"));
+        values.name = cleanText(window.$A.get("$SObjectType.CurrentUser.Name")) || values.name;
+        values.profileId = window.$A.get("$SObjectType.CurrentUser.ProfileId") || values.profileId;
+        values.profileName = cleanText(window.$A.get("$SObjectType.CurrentUser.Profile.Name")) || values.profileName;
+        values.roleId = window.$A.get("$SObjectType.CurrentUser.UserRoleId") || values.roleId;
+        values.roleName = cleanText(window.$A.get("$SObjectType.CurrentUser.UserRole.Name")) || values.roleName;
       }
     } catch (_error) {
       // Ignore framework access errors from partially loaded Lightning pages.
@@ -527,20 +991,30 @@ async function collectSalesforcePerspectiveInPage() {
       candidates.push(window.UserContext && window.UserContext.userId);
       candidates.push(window.SfdcApp && window.SfdcApp.userId);
       candidates.push(window.sfdcPage && window.sfdcPage.userId);
+      values.name = values.name || cleanText(window.UserContext && window.UserContext.name);
+      values.profileId = values.profileId || window.UserContext && window.UserContext.profileId;
+      values.profileName = values.profileName || cleanText(window.UserContext && window.UserContext.profileName);
+      values.roleId = values.roleId || window.UserContext && window.UserContext.roleId;
+      values.roleName = values.roleName || cleanText(window.UserContext && window.UserContext.roleName);
     } catch (_error) {
       // Ignore page-global access errors.
     }
 
-    return candidates.find((candidate) => isSalesforceId(candidate)) || null;
+    values.id = candidates.find((candidate) => isSalesforceId(candidate)) || null;
+    return values;
   }
 
   function appNameFromDom() {
     const selectors = [
       ".slds-context-bar__app-name .slds-truncate",
       ".slds-context-bar__app-name",
+      ".oneAppNavContainer .slds-context-bar__app-name",
+      ".oneAppNavContainer [data-aura-class='oneAppNavBar'] .slds-context-bar__label-action",
       "one-app-nav-bar a[href*='/lightning/app/'] .slds-truncate",
       "one-app-nav-bar a[href*='/lightning/app/']",
-      "a.slds-context-bar__label-action[href*='/lightning/app/']"
+      "a.slds-context-bar__label-action[href*='/lightning/app/']",
+      "[aria-label='App']",
+      "[title='App Launcher'] + *"
     ];
 
     for (const selector of selectors) {

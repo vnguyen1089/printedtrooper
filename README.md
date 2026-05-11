@@ -12,7 +12,9 @@ Salesforce 2 Perspective is a Manifest V3 Chrome extension that opens a right-si
 
 The content script only owns the side-panel UI. When you click the extension icon, the background service worker toggles the panel and handles collection requests.
 
-Salesforce API calls are executed by the background service worker through `chrome.scripting.executeScript` with `world: "MAIN"`. That injected function runs inside the Salesforce page context, so calls to `/services/data/...` are same-origin and use the browser's existing Salesforce session.
+Salesforce page context is collected by the background service worker through `chrome.scripting.executeScript` with `world: "MAIN"`. That injected function runs inside the Salesforce page context.
+
+Some Lightning UI sessions are not API-enabled and return `INVALID_SESSION_ID` for `/services/data/...` even when the page itself is signed in. When that happens, the service worker falls back to the org's Salesforce API host and uses Chrome cookie access plus host permissions to make the REST/Tooling calls from the extension context.
 
 ## Install locally
 
@@ -26,4 +28,4 @@ Salesforce API calls are executed by the background service worker through `chro
 
 - The page layout lookup uses the Tooling API `ProfileLayout` assignment when Salesforce allows it, then falls back to UI API layout metadata.
 - App detection uses the Lightning URL or navigation DOM first, then attempts to enrich that value with Tooling API `AppDefinition`.
-- If your Salesforce permissions block a metadata endpoint, the panel still displays the values it can read and lists the blocked endpoint under **Notes**.
+- If your Salesforce permissions block a metadata endpoint, the panel still displays the values it can read and lists the blocked endpoint under collapsed **Diagnostics**.
