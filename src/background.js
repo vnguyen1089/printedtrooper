@@ -6,6 +6,7 @@ const SALESFORCE_HOST_SUFFIXES = [
   ".salesforce-sites.com",
   ".my.site.com"
 ];
+const REPORT_DESCRIBE_CACHE = new Map();
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id || !isSalesforceUrl(tab.url)) {
@@ -410,15 +411,27 @@ async function resolveField(api, context, warnings) {
     throw new Error("This row does not expose a Salesforce record ID.");
   }
 
-  const objectApiName = context.objectApiName || await resolveObjectFromRecordPrefix(api, recordId, warnings);
+  const reportColumnContext = context.reportId
+    ? await resolveReportColumnContext(api, context, warnings)
+    : null;
+  const enrichedContext = {
+    ...context,
+    ...(reportColumnContext || {})
+  };
+
+  let objectApiName = context.objectApiName;
+  if (isNonEditableObject(objectApiName)) {
+    objectApiName = null;
+  }
+  objectApiName = objectApiName || await resolveObjectFromRecordPrefix(api, recordId, warnings);
   if (!objectApiName) {
     throw new Error(`Could not resolve the object type for record ${recordId}.`);
   }
 
   const describe = await api.fetchJson(`/services/data/v${api.version}/sobjects/${encodeURIComponent(objectApiName)}/describe`);
-  const field = findField(describe.fields || [], context);
+  const field = findField(describe.fields || [], enrichedContext);
   if (!field) {
-    throw new Error(fieldNotFoundMessage(objectApiName, context, describe.fields || []));
+    throw new Error(fieldNotFoundMessage(objectApiName, enrichedContext, describe.fields || []));
   }
 
   if (!field.updateable) {
@@ -449,6 +462,180 @@ async function resolveField(api, context, warnings) {
         : []
     }
   };
+}
+
+async function resolveReportColumnContext(api, context, warnings) {
+  try {
+    const reportId = normalizeId(context.reportId);
+    if (!reportId) {
+      return null;
+    }
+
+    const reportDescribe = await getReportDescribe(api, reportId);
+    const columns = collectReportColumns(reportDescribe);
+    const column = findReportColumn(columns, context);
+    if (!column) {
+      warnings.push(`Report ${reportId}: could not match report column "${context.headerText || context.columnLabel || context.fieldKey || "unknown"}" to report metadata.`);
+      return null;
+    }
+
+    return {
+      reportColumnKey: column.key,
+      reportColumnLabel: column.label,
+      fieldApiName: column.fieldName,
+      fieldKey: column.key,
+      columnLabel: column.label || context.columnLabel,
+      headerText: column.label || context.headerText
+    };
+  } catch (error) {
+    warnings.push(`Report metadata: ${error.message || String(error)}`);
+    return null;
+  }
+}
+
+async function getReportDescribe(api, reportId) {
+  const cacheKey = `${api.origin}|${api.version}|${reportId}`;
+  if (!REPORT_DESCRIBE_CACHE.has(cacheKey)) {
+    REPORT_DESCRIBE_CACHE.set(
+      cacheKey,
+      api.fetchJson(`/services/data/v${api.version}/analytics/reports/${encodeURIComponent(reportId)}/describe`)
+    );
+  }
+  return REPORT_DESCRIBE_CACHE.get(cacheKey);
+}
+
+function collectReportColumns(reportDescribe) {
+  const columns = new Map();
+  const detailColumns = reportDescribe
+    && reportDescribe.reportMetadata
+    && Array.isArray(reportDescribe.reportMetadata.detailColumns)
+    ? reportDescribe.reportMetadata.detailColumns
+    : [];
+
+  detailColumns.forEach((key, index) => addReportColumn(columns, key, { index }));
+
+  const extendedDetailInfo = reportDescribe
+    && reportDescribe.reportExtendedMetadata
+    && reportDescribe.reportExtendedMetadata.detailColumnInfo;
+  addReportColumnMap(columns, extendedDetailInfo);
+
+  const categories = reportDescribe
+    && reportDescribe.reportTypeMetadata
+    && reportDescribe.reportTypeMetadata.categories;
+  for (const category of objectValues(categories)) {
+    addReportColumnMap(columns, category && category.columns);
+  }
+
+  return Array.from(columns.values());
+}
+
+function addReportColumnMap(columns, columnMap) {
+  if (!columnMap) {
+    return;
+  }
+
+  if (Array.isArray(columnMap)) {
+    for (const entry of columnMap) {
+      addReportColumn(columns, entry && (entry.name || entry.columnName || entry.key), entry);
+    }
+    return;
+  }
+
+  for (const [key, value] of Object.entries(columnMap)) {
+    addReportColumn(columns, key, value);
+  }
+}
+
+function addReportColumn(columns, key, info = {}) {
+  if (!key) {
+    return;
+  }
+
+  const existing = columns.get(key) || { key };
+  const merged = {
+    ...existing,
+    ...info,
+    key,
+    label: info.label || info.displayName || existing.label || key,
+    fieldName: reportFieldName(key, info) || existing.fieldName
+  };
+  columns.set(key, merged);
+}
+
+function findReportColumn(columns, context) {
+  const directValues = [
+    context.fieldApiName,
+    context.fieldKey,
+    context.reportColumnKey
+  ].map(cleanColumnLabel).filter(Boolean);
+
+  for (const value of directValues) {
+    const match = columns.find((column) => lower(column.key) === lower(value) || lower(column.fieldName) === lower(value));
+    if (match) {
+      return match;
+    }
+  }
+
+  const labels = [
+    context.columnLabel,
+    context.headerText,
+    context.ariaLabel,
+    context.reportColumnLabel
+  ].map(cleanColumnLabel).filter(Boolean);
+
+  for (const label of labels) {
+    const match = columns.find((column) => lower(column.label) === lower(label));
+    if (match) {
+      return match;
+    }
+  }
+
+  const normalized = [...directValues, ...labels].map(normalizeLabel).filter(Boolean);
+  for (const value of normalized) {
+    const match = columns.find((column) => {
+      return normalizeLabel(column.label) === value
+        || normalizeLabel(column.key) === value
+        || normalizeLabel(column.fieldName) === value;
+    });
+    if (match) {
+      return match;
+    }
+  }
+
+  const indexCandidates = [
+    numberOrNull(context.columnIndex),
+    numberOrNull(context.ariaColIndex) == null ? null : numberOrNull(context.ariaColIndex) - 1
+  ].filter((value) => value != null && value >= 0);
+  for (const index of indexCandidates) {
+    const match = columns.find((column) => column.index === index);
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+function reportFieldName(key, info = {}) {
+  const values = [
+    info.fieldApiName,
+    info.entityColumnName,
+    info.columnName,
+    info.name,
+    key
+  ];
+
+  for (const value of values) {
+    const cleaned = cleanColumnLabel(value);
+    if (!cleaned) {
+      continue;
+    }
+
+    const parts = cleaned.split(/[.:]/).map((part) => cleanColumnLabel(part)).filter(Boolean);
+    return parts[parts.length - 1] || cleaned;
+  }
+
+  return "";
 }
 
 async function resolveObjectFromRecordPrefix(api, recordId, warnings) {
@@ -506,6 +693,8 @@ function candidateNames(context) {
   const raw = [
     context.fieldApiName,
     context.fieldKey,
+    context.reportColumnKey,
+    context.reportColumnLabel,
     context.columnLabel,
     context.headerText,
     context.ariaLabel
@@ -625,6 +814,22 @@ function parseFieldValue(rawValue, field) {
 
 function normalizeId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(value) ? value : null;
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function objectValues(value) {
+  if (!value) {
+    return [];
+  }
+  return Array.isArray(value) ? value : Object.values(value);
+}
+
+function isNonEditableObject(value) {
+  return ["Dashboard", "Document", "Folder", "ListView", "Report"].includes(String(value || ""));
 }
 
 function lower(value) {

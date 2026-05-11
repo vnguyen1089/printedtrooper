@@ -2,7 +2,7 @@
 
 Salesforce Inline Editor is a Manifest V3 Chrome extension that adds inline editing to Salesforce Lightning list views and report detail rows.
 
-When the extension is enabled, Salesforce table cells that expose both a record ID and a column label are highlighted. Double-click a highlighted cell to edit the value, then click **Save** to update Salesforce through the REST API using your current browser session.
+When the extension is enabled, Salesforce table cells that expose both a record ID and a column label are highlighted. Double-click a highlighted cell to edit the value, then click **Save** to update Salesforce through the REST API using your current browser session. On report result pages, the extension also reads Salesforce report metadata to map visible report columns back to updateable Salesforce fields.
 
 ## How it works
 
@@ -15,7 +15,7 @@ When you edit a cell, the background service worker calls Salesforce REST from t
 
 1. reads the latest Salesforce REST API version
 2. resolves the record's object from the page, row link, or record ID prefix
-3. matches the column label/key to an updateable field from object describe metadata
+3. matches the column label/key to an updateable field from report metadata and object describe metadata
 4. PATCHes `/services/data/vXX.X/sobjects/{ObjectApiName}/{RecordId}`
 
 ## Install locally

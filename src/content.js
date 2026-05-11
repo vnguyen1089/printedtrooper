@@ -441,19 +441,27 @@
       return null;
     }
 
-    const objectApiName = record.objectApiName || objectApiNameFromPageUrl();
+    const reportId = reportIdFromPageUrl();
+    let objectApiName = record.objectApiName || objectApiNameFromPageUrl();
     if (isNonEditableObject(objectApiName)) {
-      return null;
+      if (objectApiName === "Report" && reportId && record.recordId !== reportId) {
+        objectApiName = null;
+      } else {
+        return null;
+      }
     }
 
     return {
       recordId: record.recordId,
       objectApiName,
+      reportId,
       fieldApiName: column.fieldApiName,
       fieldKey: column.fieldKey,
       columnLabel: column.columnLabel,
       headerText: column.headerText,
-      ariaLabel: column.ariaLabel
+      ariaLabel: column.ariaLabel,
+      columnIndex: column.columnIndex,
+      ariaColIndex: column.ariaColIndex
     };
   }
 
@@ -553,13 +561,16 @@
     ]);
     const headerText = headerTextForCell(cell, row);
     const ariaLabel = cleanAriaLabel(cell.getAttribute("aria-label"));
+    const ariaColIndex = Number.parseInt(cell.getAttribute("aria-colindex") || "", 10);
 
     return {
       fieldApiName: cleanFieldKey(fieldApiName),
       fieldKey: cleanFieldKey(fieldKey),
       columnLabel: labelFromAttribute(columnLabel),
       headerText,
-      ariaLabel
+      ariaLabel,
+      columnIndex: tableCellIndex(cell, row),
+      ariaColIndex: Number.isFinite(ariaColIndex) ? ariaColIndex : null
     };
   }
 
@@ -766,6 +777,22 @@
     }
 
     return null;
+  }
+
+  function reportIdFromPageUrl() {
+    try {
+      const url = new URL(window.location.href);
+      const decodedLocation = safeDecode(`${url.pathname}${url.search}${url.hash}`);
+      const lightningMatch = decodedLocation.match(/\/lightning\/r\/Report\/([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)(?:[/?#]|$)/);
+      if (lightningMatch) {
+        return lightningMatch[1];
+      }
+
+      const classicMatch = decodedLocation.match(/(?:^|[?&#/])(?:reportId=)?(00O[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?)(?:[/?&#]|$)/);
+      return classicMatch ? classicMatch[1] : null;
+    } catch (_error) {
+      return null;
+    }
   }
 
   function salesforceRequest(payload) {
