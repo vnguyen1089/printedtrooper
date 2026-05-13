@@ -20,7 +20,7 @@
   });
 
   window.addEventListener("sf2p:toggle", togglePanel);
-  window.addEventListener("sf2p:api-request", handleApiRequest);
+  window.addEventListener("message", handleWindowMessage);
 
   function togglePanel() {
     ensurePanel();
@@ -212,19 +212,22 @@
   }
 
   function perspectiveTable(context) {
-    return tableSection("Details", ["Item", "Value", "API Name / ID", "Source"], [
-      ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType), context.recordType && context.recordType.source],
-      ["Profile", context.user && context.user.profileName, context.user && context.user.profileId, context.user && context.user.source],
-      ["Lightning Application", context.app && context.app.name, identifierLine(context.app), context.app && context.app.source],
-      ["Role", context.user && context.user.roleName, context.user && context.user.roleId, context.user && context.user.source],
-      ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout), context.pageLayout && context.pageLayout.source],
-      ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, identifierLine(context.lightningRecordPage), context.lightningRecordPage && context.lightningRecordPage.source]
+    return tableSection("Details", ["Item", "Value", "API Name / ID"], [
+      ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType)],
+      ["Profile", context.user && context.user.profileName, context.user && context.user.profileId],
+      ["Lightning Application", context.app && context.app.name, identifierLine(context.app)],
+      ["Role", context.user && context.user.roleName, context.user && context.user.roleId],
+      ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout)],
+      ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, identifierLine(context.lightningRecordPage)]
     ]);
   }
 
   function tableSection(titleText, headers, rows) {
     const section = document.createElement("section");
     section.className = "sf2p-table-section";
+    if (headers.length > 3) {
+      section.classList.add("sf2p-wide-table");
+    }
     const title = document.createElement("h2");
     title.textContent = titleText;
     const scroller = document.createElement("div");
@@ -388,9 +391,13 @@
     });
   }
 
-  async function handleApiRequest(event) {
-    const detail = event && event.detail || {};
-    if (!detail.requestId || !detail.path) {
+  async function handleWindowMessage(event) {
+    if (event.source !== window) {
+      return;
+    }
+
+    const detail = event.data || {};
+    if (!detail || detail.source !== "sf2p" || detail.type !== "api-request" || !detail.requestId || !detail.path) {
       return;
     }
 
@@ -407,12 +414,12 @@
   }
 
   function dispatchApiResponse(requestId, response) {
-    window.dispatchEvent(new CustomEvent("sf2p:api-response", {
-      detail: {
-        requestId,
-        response
-      }
-    }));
+    window.postMessage({
+      source: "sf2p",
+      type: "api-response",
+      requestId,
+      response
+    }, window.location.origin);
   }
 
   function styles() {
@@ -584,8 +591,12 @@
 
       table {
         border-collapse: collapse;
-        min-width: 560px;
+        table-layout: fixed;
         width: 100%;
+      }
+
+      .sf2p-wide-table table {
+        min-width: 640px;
       }
 
       th,

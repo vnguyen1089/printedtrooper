@@ -1078,9 +1078,24 @@ async function collectSalesforcePerspectiveInPage() {
     }
 
     const launcherRect = launcher.getBoundingClientRect();
-    const candidates = [...document.querySelectorAll("a, button, span, div")]
+    const textCandidates = visibleTextNodesNearRect(launcherRect)
+      .filter((candidate) => {
+        if (!candidate.text || !candidate.rect || candidate.rect.width <= 0 || candidate.rect.height <= 0) {
+          return false;
+        }
+        const verticallyAligned = candidate.rect.bottom >= launcherRect.top - 12 && candidate.rect.top <= launcherRect.bottom + 12;
+        const toTheRight = candidate.rect.left >= launcherRect.right - 8 && candidate.rect.left <= launcherRect.right + 180;
+        const inHeader = candidate.rect.top <= 140;
+        return verticallyAligned && toTheRight && inHeader;
+      })
+      .sort((left, right) => left.rect.left - right.rect.left);
+
+    if (textCandidates.length) {
+      return textCandidates[0].text;
+    }
+
+    const elementCandidates = [...document.querySelectorAll("a, button, span, div")]
       .map((element) => ({
-        element,
         text: appNameFromElement(element),
         rect: element.getBoundingClientRect()
       }))
@@ -1095,7 +1110,41 @@ async function collectSalesforcePerspectiveInPage() {
       })
       .sort((left, right) => left.rect.left - right.rect.left);
 
-    return candidates.length ? candidates[0].text : null;
+    return elementCandidates.length ? elementCandidates[0].text : null;
+  }
+
+  function visibleTextNodesNearRect(referenceRect) {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const text = cleanText(node.nodeValue);
+        if (!isLikelyAppName(text)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        const parent = node.parentElement;
+        return parent && isVisibleElement(parent) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+    });
+    const results = [];
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rect = range.getBoundingClientRect();
+      range.detach();
+      const verticallyAligned = rect.bottom >= referenceRect.top - 12 && rect.top <= referenceRect.bottom + 12;
+      const toTheRight = rect.left >= referenceRect.right - 8 && rect.left <= referenceRect.right + 220;
+      const inHeader = rect.top <= 140;
+
+      if (verticallyAligned && toTheRight && inHeader) {
+        results.push({
+          text: cleanText(node.nodeValue),
+          rect
+        });
+      }
+    }
+
+    return results;
   }
 
   function isLikelyAppName(text) {
@@ -1207,18 +1256,22 @@ async function collectSalesforcePerspectiveInPage() {
     return new Promise((resolve, reject) => {
       const requestId = `sf2p-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const timeout = setTimeout(() => {
-        window.removeEventListener("sf2p:api-response", handleResponse);
+        window.removeEventListener("message", handleResponse);
         reject(new Error("Timed out waiting for the extension API proxy."));
       }, 15000);
 
       function handleResponse(event) {
-        const detail = event && event.detail || {};
-        if (detail.requestId !== requestId) {
+        if (event.source !== window) {
+          return;
+        }
+
+        const detail = event.data || {};
+        if (!detail || detail.source !== "sf2p" || detail.type !== "api-response" || detail.requestId !== requestId) {
           return;
         }
 
         clearTimeout(timeout);
-        window.removeEventListener("sf2p:api-response", handleResponse);
+        window.removeEventListener("message", handleResponse);
         const response = detail.response || {};
         if (response.ok) {
           resolve(response.body);
@@ -1227,13 +1280,13 @@ async function collectSalesforcePerspectiveInPage() {
         reject(new Error(response.error || "Extension API proxy failed."));
       }
 
-      window.addEventListener("sf2p:api-response", handleResponse);
-      window.dispatchEvent(new CustomEvent("sf2p:api-request", {
-        detail: {
-          requestId,
-          path
-        }
-      }));
+      window.addEventListener("message", handleResponse);
+      window.postMessage({
+        source: "sf2p",
+        type: "api-request",
+        requestId,
+        path
+      }, window.location.origin);
     });
   }
 
