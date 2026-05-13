@@ -5,6 +5,7 @@
   "description": "Shows Salesforce profile, role, app, layout, Lightning record page, and permission set context.",
   "permissions": [
     "activeTab",
+    "cookies",
     "scripting",
     "tabs"
   ],

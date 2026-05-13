@@ -30,7 +30,21 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== "SF2P_COLLECT_CONTEXT") {
+  if (!message) {
+    return false;
+  }
+
+  if (message.type === "SF2P_API_FETCH") {
+    apiFetchFromExtension(message.currentUrl || sender.tab && sender.tab.url, message.path)
+      .then((body) => sendResponse({ ok: true, body }))
+      .catch((error) => {
+        console.error("Salesforce 2 Perspective API proxy failed.", error);
+        sendResponse({ ok: false, error: error.message || String(error) });
+      });
+    return true;
+  }
+
+  if (message.type !== "SF2P_COLLECT_CONTEXT") {
     return false;
   }
 
@@ -92,6 +106,132 @@ async function collectContext(tabId) {
   }
 
   return result.result;
+}
+
+async function apiFetchFromExtension(currentUrl, path) {
+  const urls = salesforceApiUrlsFromUrl(currentUrl, path);
+  const errors = [];
+
+  for (const url of urls) {
+    const sessionId = await getSessionIdForUrl(url);
+
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        credentials: "include",
+        headers: {
+          "Accept": "application/json",
+          ...(sessionId ? { "Authorization": `Bearer ${sessionId}` } : {})
+        }
+      });
+      const body = await parseResponseBody(response);
+
+      if (response.ok) {
+        return body;
+      }
+
+      const message = `${displayExtensionApiUrl(url)} returned ${response.status}: ${salesforceApiErrorMessage(body)}`;
+      errors.push(message);
+      if (!shouldTryNextExtensionApiUrl(response.status)) {
+        break;
+      }
+    } catch (error) {
+      errors.push(`${displayExtensionApiUrl(url)}: ${error.message || String(error)}`);
+    }
+  }
+
+  throw new Error(errors.join("; ") || "Salesforce API proxy could not reach an API host.");
+}
+
+async function parseResponseBody(response) {
+  const text = await response.text();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    return text;
+  }
+}
+
+async function getSessionIdForUrl(url) {
+  if (!chrome.cookies || typeof chrome.cookies.get !== "function") {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(url);
+    const cookie = await chrome.cookies.get({ url: `${parsed.origin}/`, name: "sid" });
+    return cookie && cookie.value || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function salesforceApiUrlsFromUrl(currentUrl, path) {
+  if (/^https?:\/\//i.test(path)) {
+    return [path];
+  }
+
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const origins = [];
+
+  try {
+    const parsed = new URL(currentUrl);
+    const apiOrigin = salesforceApiOriginFromHost(parsed.hostname);
+    if (apiOrigin) {
+      origins.push(apiOrigin);
+    }
+    origins.push(parsed.origin);
+  } catch (_error) {
+    // Fall through to the relative path if URL parsing fails.
+  }
+
+  return uniqueExtensionValues(origins).map((origin) => `${origin}${normalizedPath}`);
+}
+
+function salesforceApiOriginFromHost(host) {
+  const normalizedHost = String(host || "").toLowerCase();
+  if (normalizedHost.endsWith(".lightning.force.com")) {
+    return `https://${host.replace(/\.lightning\.force\.com$/i, ".my.salesforce.com")}`;
+  }
+  if (
+    normalizedHost.endsWith(".my.salesforce.com") ||
+    normalizedHost.endsWith(".salesforce.com") ||
+    normalizedHost.endsWith(".force.com")
+  ) {
+    return `https://${host}`;
+  }
+  return null;
+}
+
+function shouldTryNextExtensionApiUrl(status) {
+  return status === 401 || status === 403 || status === 404;
+}
+
+function displayExtensionApiUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch (_error) {
+    return url;
+  }
+}
+
+function salesforceApiErrorMessage(body) {
+  if (Array.isArray(body)) {
+    return body.map((entry) => entry && entry.message || JSON.stringify(entry)).join("; ");
+  }
+  if (body && typeof body === "object") {
+    return body.message || body.error_description || body.error || JSON.stringify(body);
+  }
+  return body || "No response body";
+}
+
+function uniqueExtensionValues(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
 async function collectSalesforcePerspectiveInPage() {
@@ -741,6 +881,12 @@ async function collectSalesforcePerspectiveInPage() {
       }
     }
 
+    try {
+      return await extensionApiFetch(path);
+    } catch (error) {
+      errors.push(`Extension API proxy: ${error.message || String(error)}`);
+    }
+
     throw new Error(errors.join("; "));
   }
 
@@ -962,6 +1108,40 @@ async function collectSalesforcePerspectiveInPage() {
     } catch (_error) {
       return url;
     }
+  }
+
+  function extensionApiFetch(path) {
+    return new Promise((resolve, reject) => {
+      const requestId = `sf2p-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const timeout = setTimeout(() => {
+        window.removeEventListener("sf2p:api-response", handleResponse);
+        reject(new Error("Timed out waiting for the extension API proxy."));
+      }, 15000);
+
+      function handleResponse(event) {
+        const detail = event && event.detail || {};
+        if (detail.requestId !== requestId) {
+          return;
+        }
+
+        clearTimeout(timeout);
+        window.removeEventListener("sf2p:api-response", handleResponse);
+        const response = detail.response || {};
+        if (response.ok) {
+          resolve(response.body);
+          return;
+        }
+        reject(new Error(response.error || "Extension API proxy failed."));
+      }
+
+      window.addEventListener("sf2p:api-response", handleResponse);
+      window.dispatchEvent(new CustomEvent("sf2p:api-request", {
+        detail: {
+          requestId,
+          path
+        }
+      }));
+    });
   }
 
   function normalizeList(value) {

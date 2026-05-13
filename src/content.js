@@ -20,6 +20,7 @@
   });
 
   window.addEventListener("sf2p:toggle", togglePanel);
+  window.addEventListener("sf2p:api-request", handleApiRequest);
 
   function togglePanel() {
     ensurePanel();
@@ -385,6 +386,33 @@
         resolve(response);
       });
     });
+  }
+
+  async function handleApiRequest(event) {
+    const detail = event && event.detail || {};
+    if (!detail.requestId || !detail.path) {
+      return;
+    }
+
+    try {
+      const response = await sendMessage({
+        type: "SF2P_API_FETCH",
+        path: detail.path,
+        currentUrl: window.location.href
+      });
+      dispatchApiResponse(detail.requestId, response || { ok: false, error: "No API response returned." });
+    } catch (error) {
+      dispatchApiResponse(detail.requestId, { ok: false, error: error.message || String(error) });
+    }
+  }
+
+  function dispatchApiResponse(requestId, response) {
+    window.dispatchEvent(new CustomEvent("sf2p:api-response", {
+      detail: {
+        requestId,
+        response
+      }
+    }));
   }
 
   function styles() {
