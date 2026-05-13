@@ -4,7 +4,7 @@ Salesforce Perspectives is a Manifest V3 Chrome extension that opens a right-sid
 
 - Record type
 - Profile
-- Lightning application
+- App name
 - Role
 - Page layout
 - Lightning record page and API name
@@ -27,7 +27,7 @@ Salesforce API calls are executed through `chrome.scripting.executeScript` with 
 ## Notes
 
 - The page layout lookup uses the Tooling API `ProfileLayout` assignment when Salesforce allows it, then falls back to UI API layout metadata.
-- App detection mirrors the visible Lightning app name in the top-left header.
+- App name detection mirrors the visible functional Salesforce app name in the top-left header, such as Sales, Service, or Marketing.
 - Lightning record page detection reads FlexiPage assignment metadata when Tooling API metadata is available, then falls back to FlexiPage candidates for the current object.
 - Permission sets are listed from `PermissionSetAssignment`, excluding profile-owned permission sets.
 - If your Salesforce permissions block a metadata endpoint, the panel still displays the values it can read and lists the blocked endpoint under **Notes**.

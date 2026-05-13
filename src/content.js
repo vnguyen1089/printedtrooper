@@ -215,7 +215,7 @@
     return tableSection("Details", ["Item", "Value", "API Name / ID"], [
       ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType)],
       ["Profile", context.user && context.user.profileName, context.user && context.user.profileId],
-      ["Lightning Application", context.app && context.app.name, identifierLine(context.app)],
+      ["App Name", context.app && context.app.name, null],
       ["Role", context.user && context.user.roleName, context.user && context.user.roleId],
       ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout)],
       ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, identifierLine(context.lightningRecordPage)]
