@@ -113,27 +113,37 @@ async function apiFetchFromExtension(currentUrl, path) {
   const errors = [];
 
   for (const url of urls) {
-    const sessionId = await getSessionIdForUrl(url);
+    const sessionIds = await getSessionIdsForUrls([currentUrl, url]);
 
     try {
-      const response = await fetch(url, {
-        method: "GET",
-        credentials: "include",
-        headers: {
-          "Accept": "application/json",
-          ...(sessionId ? { "Authorization": `Bearer ${sessionId}` } : {})
+      const attempts = [
+        { label: "cookie session", authorization: null },
+        ...sessionIds.map((sessionId, index) => ({
+          label: `sid cookie ${index + 1}`,
+          authorization: `Bearer ${sessionId}`
+        }))
+      ];
+
+      for (const attempt of attempts) {
+        const response = await fetch(url, {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            "Accept": "application/json",
+            ...(attempt.authorization ? { "Authorization": attempt.authorization } : {})
+          }
+        });
+        const body = await parseResponseBody(response);
+
+        if (response.ok) {
+          return body;
         }
-      });
-      const body = await parseResponseBody(response);
 
-      if (response.ok) {
-        return body;
-      }
-
-      const message = `${displayExtensionApiUrl(url)} returned ${response.status}: ${salesforceApiErrorMessage(body)}`;
-      errors.push(message);
-      if (!shouldTryNextExtensionApiUrl(response.status)) {
-        break;
+        const message = `${displayExtensionApiUrl(url)} (${attempt.label}) returned ${response.status}: ${salesforceApiErrorMessage(body)}`;
+        errors.push(message);
+        if (!shouldTryNextExtensionApiUrl(response.status)) {
+          break;
+        }
       }
     } catch (error) {
       errors.push(`${displayExtensionApiUrl(url)}: ${error.message || String(error)}`);
@@ -156,18 +166,30 @@ async function parseResponseBody(response) {
   }
 }
 
-async function getSessionIdForUrl(url) {
-  if (!chrome.cookies || typeof chrome.cookies.get !== "function") {
-    return null;
+async function getSessionIdsForUrls(urls) {
+  if (!chrome.cookies || typeof chrome.cookies.getAll !== "function") {
+    return [];
   }
 
-  try {
-    const parsed = new URL(url);
-    const cookie = await chrome.cookies.get({ url: `${parsed.origin}/`, name: "sid" });
-    return cookie && cookie.value || null;
-  } catch (_error) {
-    return null;
+  const values = [];
+  for (const url of urls.filter(Boolean)) {
+    try {
+      const parsed = new URL(url);
+      const exactCookies = await chrome.cookies.getAll({ url: `${parsed.origin}/`, name: "sid" });
+      values.push(...exactCookies.map((cookie) => cookie.value));
+
+      const domainParts = parsed.hostname.split(".");
+      for (let index = 0; index < domainParts.length - 1; index += 1) {
+        const domain = domainParts.slice(index).join(".");
+        const domainCookies = await chrome.cookies.getAll({ domain, name: "sid" });
+        values.push(...domainCookies.map((cookie) => cookie.value));
+      }
+    } catch (_error) {
+      // Ignore malformed URLs and cookie access failures for individual hosts.
+    }
   }
+
+  return uniqueExtensionValues(values);
 }
 
 function salesforceApiUrlsFromUrl(currentUrl, path) {
@@ -1078,6 +1100,11 @@ async function collectSalesforcePerspectiveInPage() {
     }
 
     const launcherRect = launcher.getBoundingClientRect();
+    const pointText = appNameFromPointsNearLauncher(launcherRect);
+    if (pointText) {
+      return pointText;
+    }
+
     const textCandidates = visibleTextNodesNearRect(launcherRect)
       .filter((candidate) => {
         if (!candidate.text || !candidate.rect || candidate.rect.width <= 0 || candidate.rect.height <= 0) {
@@ -1111,6 +1138,58 @@ async function collectSalesforcePerspectiveInPage() {
       .sort((left, right) => left.rect.left - right.rect.left);
 
     return elementCandidates.length ? elementCandidates[0].text : null;
+  }
+
+  function appNameFromPointsNearLauncher(launcherRect) {
+    const yValues = [
+      launcherRect.top + launcherRect.height / 2,
+      launcherRect.top + 4,
+      launcherRect.bottom - 4
+    ];
+
+    for (const y of yValues) {
+      for (let x = launcherRect.right + 8; x <= launcherRect.right + 180; x += 8) {
+        const element = document.elementFromPoint(x, y);
+        const text = appNameFromElementChain(element);
+        if (text) {
+          return text;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function appNameFromElementChain(element) {
+    let current = element;
+    while (current && current !== document.body) {
+      const text = firstLikelyAppNameFromText(current.textContent);
+      if (text) {
+        return text;
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function firstLikelyAppNameFromText(value) {
+    const normalized = cleanText(value);
+    if (!normalized) {
+      return null;
+    }
+
+    const parts = normalized.split(/\s{2,}|\n|\t/).map((part) => cleanText(part));
+    if (parts.length === 1) {
+      const words = normalized.split(" ").map((part) => cleanText(part));
+      parts.push(words[0], words.slice(0, 2).join(" "));
+    }
+
+    for (const part of parts) {
+      if (isLikelyAppName(part)) {
+        return part;
+      }
+    }
+    return null;
   }
 
   function visibleTextNodesNearRect(referenceRect) {
