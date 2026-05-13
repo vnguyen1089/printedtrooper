@@ -155,12 +155,7 @@
     }
 
     fragment.append(sectionIntro("Current Salesforce perspective"));
-    fragment.append(fieldCard("Record Type", context.recordType && context.recordType.name, context.recordType && detailLine(context.recordType)));
-    fragment.append(fieldCard("Profile", context.user && context.user.profileName, context.user && detailLine({ id: context.user.profileId, source: context.user.source })));
-    fragment.append(fieldCard("Lightning Application", context.app && context.app.name, context.app && detailLine(context.app)));
-    fragment.append(fieldCard("Role", context.user && context.user.roleName, context.user && detailLine({ id: context.user.roleId, source: context.user.source })));
-    fragment.append(fieldCard("Page Layout", context.pageLayout && context.pageLayout.name, context.pageLayout && detailLine(context.pageLayout)));
-    fragment.append(fieldCard("Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, context.lightningRecordPage && detailLine(context.lightningRecordPage)));
+    fragment.append(perspectiveTable(context));
     fragment.append(recordSummary(context));
 
     if (context.warnings && context.warnings.length) {
@@ -200,34 +195,79 @@
       return fragment;
     }
 
-    for (const permissionSet of permissionSets) {
-      fragment.append(permissionSetCard(permissionSet));
-    }
+    fragment.append(tableSection(
+      "Permission Sets",
+      ["Label", "API Name", "Namespace", "Permission Set ID", "Assignment ID"],
+      permissionSets.map((permissionSet) => [
+        permissionSet.label,
+        permissionSet.name,
+        permissionSet.namespacePrefix,
+        permissionSet.id,
+        permissionSet.assignmentId
+      ])
+    ));
 
     return fragment;
   }
 
-  function permissionSetCard(permissionSet) {
-    const detailParts = [];
-    if (permissionSet.name) {
-      detailParts.push(`API Name: ${permissionSet.name}`);
-    }
-    if (permissionSet.namespacePrefix) {
-      detailParts.push(`Namespace: ${permissionSet.namespacePrefix}`);
-    }
-    if (permissionSet.id) {
-      detailParts.push(permissionSet.id);
-    }
-    if (permissionSet.assignmentId) {
-      detailParts.push(`Assignment: ${permissionSet.assignmentId}`);
-    }
-    if (permissionSet.source) {
-      detailParts.push(permissionSet.source);
+  function perspectiveTable(context) {
+    return tableSection("Details", ["Item", "Value", "API Name / ID", "Source"], [
+      ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType), context.recordType && context.recordType.source],
+      ["Profile", context.user && context.user.profileName, context.user && context.user.profileId, context.user && context.user.source],
+      ["Lightning Application", context.app && context.app.name, identifierLine(context.app), context.app && context.app.source],
+      ["Role", context.user && context.user.roleName, context.user && context.user.roleId, context.user && context.user.source],
+      ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout), context.pageLayout && context.pageLayout.source],
+      ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, identifierLine(context.lightningRecordPage), context.lightningRecordPage && context.lightningRecordPage.source]
+    ]);
+  }
+
+  function tableSection(titleText, headers, rows) {
+    const section = document.createElement("section");
+    section.className = "sf2p-table-section";
+    const title = document.createElement("h2");
+    title.textContent = titleText;
+    const scroller = document.createElement("div");
+    scroller.className = "sf2p-table-scroll";
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+
+    for (const header of headers) {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = header;
+      headerRow.append(cell);
     }
 
-    const card = fieldCard("Permission Set", permissionSet.label || permissionSet.name, detailParts.join(" | "));
-    card.classList.add("sf2p-permission-set");
-    return card;
+    const tbody = document.createElement("tbody");
+    for (const row of rows) {
+      const rowElement = document.createElement("tr");
+      for (const value of row) {
+        const cell = document.createElement("td");
+        cell.textContent = value || "Unavailable";
+        rowElement.append(cell);
+      }
+      tbody.append(rowElement);
+    }
+
+    thead.append(headerRow);
+    table.append(thead, tbody);
+    scroller.append(table);
+    section.append(title, scroller);
+    return section;
+  }
+
+  function identifierLine(value) {
+    if (!value) {
+      return null;
+    }
+
+    return [
+      value.apiName && `API Name: ${value.apiName}`,
+      value.id,
+      value.developerName && value.developerName !== value.apiName ? value.developerName : null,
+      value.durableId && value.durableId !== value.id && value.durableId !== value.apiName ? value.durableId : null
+    ].filter(Boolean).join(" | ");
   }
 
   function sectionIntro(text) {
@@ -315,26 +355,6 @@
 
     section.append(title, list);
     return section;
-  }
-
-  function detailLine(value) {
-    const parts = [];
-    if (value.apiName) {
-      parts.push(`API Name: ${value.apiName}`);
-    }
-    if (value.id) {
-      parts.push(value.id);
-    }
-    if (value.developerName) {
-      parts.push(value.developerName);
-    }
-    if (value.durableId && value.durableId !== value.id) {
-      parts.push(value.durableId);
-    }
-    if (value.source) {
-      parts.push(value.source);
-    }
-    return parts.join(" | ");
   }
 
   function button(label, className) {
@@ -487,7 +507,7 @@
 
       .sf2p-intro,
       .sf2p-card,
-      .sf2p-permission-set,
+      .sf2p-table-section,
       .sf2p-summary,
       .sf2p-warnings,
       .sf2p-error,
@@ -527,6 +547,37 @@
         color: #706e6b;
         font-size: 12px;
         margin-top: 6px;
+        overflow-wrap: anywhere;
+      }
+
+      .sf2p-table-scroll {
+        overflow-x: auto;
+      }
+
+      table {
+        border-collapse: collapse;
+        min-width: 560px;
+        width: 100%;
+      }
+
+      th,
+      td {
+        border-top: 1px solid #f0f0f0;
+        font-size: 12px;
+        padding: 9px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: #5c5c5c;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      td {
+        color: #181818;
         overflow-wrap: anywhere;
       }
 

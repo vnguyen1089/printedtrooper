@@ -192,6 +192,18 @@ async function collectSalesforcePerspectiveInPage() {
     const response = await attempt("User profile and role", () => query(apiVersion, soql));
     const record = response && response.records && response.records[0];
 
+    if (!response) {
+      return {
+        id: userId,
+        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
+        profileId: null,
+        profileName: "Unavailable",
+        roleId: null,
+        roleName: "Unavailable",
+        source: "Current user id; SOQL user lookup unavailable"
+      };
+    }
+
     if (!record) {
       return {
         id: userId,
@@ -692,29 +704,44 @@ async function collectSalesforcePerspectiveInPage() {
   }
 
   async function apiFetch(path) {
-    const response = await fetch(path, {
-      method: "GET",
-      credentials: "same-origin",
-      headers: {
-        "Accept": "application/json"
-      }
-    });
-    const text = await response.text();
-    let body = null;
+    const urls = salesforceApiUrls(path);
+    const errors = [];
 
-    if (text) {
+    for (const url of urls) {
       try {
-        body = JSON.parse(text);
-      } catch (_error) {
-        body = text;
+        const response = await fetch(url, {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            "Accept": "application/json"
+          }
+        });
+        const text = await response.text();
+        let body = null;
+
+        if (text) {
+          try {
+            body = JSON.parse(text);
+          } catch (_error) {
+            body = text;
+          }
+        }
+
+        if (response.ok) {
+          return body;
+        }
+
+        const message = `${displayApiUrl(url)} returned ${response.status}: ${salesforceErrorMessage(body)}`;
+        errors.push(message);
+        if (!shouldTryNextApiUrl(response.status)) {
+          throw new Error(message);
+        }
+      } catch (error) {
+        errors.push(`${displayApiUrl(url)}: ${error.message || String(error)}`);
       }
     }
 
-    if (!response.ok) {
-      throw new Error(`${path} returned ${response.status}: ${salesforceErrorMessage(body)}`);
-    }
-
-    return body;
+    throw new Error(errors.join("; "));
   }
 
   async function query(apiVersion, soql) {
@@ -846,6 +873,10 @@ async function collectSalesforcePerspectiveInPage() {
     const selectors = [
       ".slds-context-bar__app-name .slds-truncate",
       ".slds-context-bar__app-name",
+      ".slds-context-bar__primary .slds-context-bar__label-action .slds-truncate",
+      ".slds-context-bar__primary .slds-context-bar__label-action",
+      "one-app-nav-bar-item-root a[href*='/lightning/app/'] .slds-truncate",
+      "one-app-nav-bar-item-root a[href*='/lightning/app/']",
       "one-app-nav-bar a[href*='/lightning/app/'] .slds-truncate",
       "one-app-nav-bar a[href*='/lightning/app/']",
       "a.slds-context-bar__label-action[href*='/lightning/app/']"
@@ -892,6 +923,45 @@ async function collectSalesforcePerspectiveInPage() {
 
   function isSafeObjectApiName(value) {
     return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(value);
+  }
+
+  function salesforceApiUrls(path) {
+    if (/^https?:\/\//i.test(path)) {
+      return [path];
+    }
+
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    const currentOrigin = window.location.origin;
+    const apiOrigin = salesforceApiOriginFromHost(window.location.host);
+    return unique([apiOrigin, currentOrigin].filter(Boolean)).map((origin) => `${origin}${normalizedPath}`);
+  }
+
+  function salesforceApiOriginFromHost(host) {
+    const normalizedHost = String(host || "").toLowerCase();
+    if (normalizedHost.endsWith(".lightning.force.com")) {
+      return `https://${host.replace(/\.lightning\.force\.com$/i, ".my.salesforce.com")}`;
+    }
+    if (
+      normalizedHost.endsWith(".my.salesforce.com") ||
+      normalizedHost.endsWith(".salesforce.com") ||
+      normalizedHost.endsWith(".force.com")
+    ) {
+      return window.location.origin;
+    }
+    return null;
+  }
+
+  function shouldTryNextApiUrl(status) {
+    return status === 401 || status === 403 || status === 404;
+  }
+
+  function displayApiUrl(url) {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch (_error) {
+      return url;
+    }
   }
 
   function normalizeList(value) {
