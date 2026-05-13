@@ -147,6 +147,9 @@
 
     if (activeTab === "permissionSets") {
       fragment.append(permissionSetsTab(context.permissionSets || []));
+      if (context.warnings && context.warnings.length) {
+        fragment.append(warningsList(context.warnings));
+      }
       replaceChildren(body, fragment);
       return;
     }

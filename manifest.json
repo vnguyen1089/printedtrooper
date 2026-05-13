@@ -10,6 +10,7 @@
   ],
   "host_permissions": [
     "https://*.salesforce.com/*",
+    "https://*.my.salesforce.com/*",
     "https://*.force.com/*",
     "https://*.lightning.force.com/*",
     "https://*.visualforce.com/*",
@@ -27,6 +28,7 @@
     {
       "matches": [
         "https://*.salesforce.com/*",
+        "https://*.my.salesforce.com/*",
         "https://*.force.com/*",
         "https://*.lightning.force.com/*",
         "https://*.visualforce.com/*",
