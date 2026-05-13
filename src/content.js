@@ -11,6 +11,7 @@
   let shadowRoot = null;
   let isOpen = false;
   let lastContext = null;
+  let activeTab = "perspective";
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message && message.type === "SF2P_TOGGLE_PANEL") {
@@ -142,12 +143,21 @@
     const body = getBody();
     const fragment = document.createDocumentFragment();
 
+    fragment.append(tabs());
+
+    if (activeTab === "permissionSets") {
+      fragment.append(permissionSetsTab(context.permissionSets || []));
+      replaceChildren(body, fragment);
+      return;
+    }
+
     fragment.append(sectionIntro("Current Salesforce perspective"));
     fragment.append(fieldCard("Record Type", context.recordType && context.recordType.name, context.recordType && detailLine(context.recordType)));
     fragment.append(fieldCard("Profile", context.user && context.user.profileName, context.user && detailLine({ id: context.user.profileId, source: context.user.source })));
-    fragment.append(fieldCard("App", context.app && context.app.name, context.app && detailLine(context.app)));
+    fragment.append(fieldCard("Lightning Application", context.app && context.app.name, context.app && detailLine(context.app)));
     fragment.append(fieldCard("Role", context.user && context.user.roleName, context.user && detailLine({ id: context.user.roleId, source: context.user.source })));
     fragment.append(fieldCard("Page Layout", context.pageLayout && context.pageLayout.name, context.pageLayout && detailLine(context.pageLayout)));
+    fragment.append(fieldCard("Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, context.lightningRecordPage && detailLine(context.lightningRecordPage)));
     fragment.append(recordSummary(context));
 
     if (context.warnings && context.warnings.length) {
@@ -155,6 +165,66 @@
     }
 
     replaceChildren(body, fragment);
+  }
+
+  function tabs() {
+    const nav = document.createElement("nav");
+    nav.className = "sf2p-tabs";
+    nav.setAttribute("aria-label", "Salesforce 2 Perspective tabs");
+    nav.append(tabButton("Perspective", "perspective"), tabButton("Permission Sets", "permissionSets"));
+    return nav;
+  }
+
+  function tabButton(label, tabName) {
+    const element = button(label, "sf2p-tab");
+    element.dataset.active = String(activeTab === tabName);
+    element.setAttribute("aria-pressed", String(activeTab === tabName));
+    element.addEventListener("click", () => {
+      activeTab = tabName;
+      if (lastContext) {
+        renderContext(lastContext);
+      }
+    });
+    return element;
+  }
+
+  function permissionSetsTab(permissionSets) {
+    const fragment = document.createDocumentFragment();
+    fragment.append(sectionIntro(`${permissionSets.length} permission set${permissionSets.length === 1 ? "" : "s"} assigned to this user`));
+
+    if (!permissionSets.length) {
+      fragment.append(fieldCard("Permission Sets", "None returned", "Profile-owned permission sets are excluded."));
+      return fragment;
+    }
+
+    for (const permissionSet of permissionSets) {
+      fragment.append(permissionSetCard(permissionSet));
+    }
+
+    return fragment;
+  }
+
+  function permissionSetCard(permissionSet) {
+    const detailParts = [];
+    if (permissionSet.name) {
+      detailParts.push(`API Name: ${permissionSet.name}`);
+    }
+    if (permissionSet.namespacePrefix) {
+      detailParts.push(`Namespace: ${permissionSet.namespacePrefix}`);
+    }
+    if (permissionSet.id) {
+      detailParts.push(permissionSet.id);
+    }
+    if (permissionSet.assignmentId) {
+      detailParts.push(`Assignment: ${permissionSet.assignmentId}`);
+    }
+    if (permissionSet.source) {
+      detailParts.push(permissionSet.source);
+    }
+
+    const card = fieldCard("Permission Set", permissionSet.label || permissionSet.name, detailParts.join(" | "));
+    card.classList.add("sf2p-permission-set");
+    return card;
   }
 
   function sectionIntro(text) {
@@ -246,6 +316,9 @@
 
   function detailLine(value) {
     const parts = [];
+    if (value.apiName) {
+      parts.push(`API Name: ${value.apiName}`);
+    }
     if (value.id) {
       parts.push(value.id);
     }
@@ -375,6 +448,31 @@
         background: rgba(255, 255, 255, 0.22);
       }
 
+      .sf2p-tabs {
+        background: #fff;
+        border-bottom: 1px solid #d8dde6;
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 1fr 1fr;
+        padding: 12px 16px 0;
+      }
+
+      .sf2p-tab {
+        background: #f3f3f3;
+        border: 1px solid #c9c9c9;
+        border-bottom: 0;
+        border-radius: 10px 10px 0 0;
+        color: #032d60;
+        padding: 10px;
+      }
+
+      .sf2p-tab:hover,
+      .sf2p-tab[data-active="true"] {
+        background: #eef4ff;
+        border-color: #aacbff;
+        color: #0176d3;
+      }
+
       .sf2p-body {
         display: flex;
         flex: 1;
@@ -386,6 +484,7 @@
 
       .sf2p-intro,
       .sf2p-card,
+      .sf2p-permission-set,
       .sf2p-summary,
       .sf2p-warnings,
       .sf2p-error,

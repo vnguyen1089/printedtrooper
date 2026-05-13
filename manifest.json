@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Salesforce 2 Perspective",
-  "version": "1.0.0",
-  "description": "Shows the Salesforce record type, profile, app, role, and page layout for the current page.",
+  "version": "1.1.0",
+  "description": "Shows Salesforce profile, role, app, layout, Lightning record page, and permission set context.",
   "permissions": [
     "activeTab",
     "scripting",

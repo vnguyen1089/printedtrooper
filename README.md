@@ -4,9 +4,11 @@ Salesforce 2 Perspective is a Manifest V3 Chrome extension that opens a right-si
 
 - Record type
 - Profile
-- App
+- Lightning application
 - Role
 - Page layout
+- Lightning record page and API name
+- Assigned permission sets
 
 ## How it works
 
@@ -26,4 +28,6 @@ Salesforce API calls are executed by the background service worker through `chro
 
 - The page layout lookup uses the Tooling API `ProfileLayout` assignment when Salesforce allows it, then falls back to UI API layout metadata.
 - App detection uses the Lightning URL or navigation DOM first, then attempts to enrich that value with Tooling API `AppDefinition`.
+- Lightning record page detection reads FlexiPage assignment metadata when Tooling API metadata is available, then falls back to FlexiPage candidates for the current object.
+- Permission sets are listed from `PermissionSetAssignment`, excluding profile-owned permission sets.
 - If your Salesforce permissions block a metadata endpoint, the panel still displays the values it can read and lists the blocked endpoint under **Notes**.

@@ -117,6 +117,8 @@ async function collectSalesforcePerspectiveInPage() {
     const recordType = await resolveRecordType(apiVersion, parsedPage, objectInfo);
     const app = await resolveCurrentApp(apiVersion, parsedPage);
     const pageLayout = await resolvePageLayout(apiVersion, parsedPage, user, recordType);
+    const lightningRecordPage = await resolveLightningRecordPage(apiVersion, parsedPage, user, recordType, app);
+    const permissionSets = await getPermissionSets(apiVersion, user);
 
     return {
       ok: true,
@@ -128,6 +130,7 @@ async function collectSalesforcePerspectiveInPage() {
       },
       user,
       app,
+      lightningRecordPage,
       record: {
         id: parsedPage.recordId || null,
         objectApiName: parsedPage.objectApiName || null,
@@ -135,6 +138,7 @@ async function collectSalesforcePerspectiveInPage() {
       },
       recordType,
       pageLayout,
+      permissionSets,
       warnings
     };
   } catch (error) {
@@ -209,6 +213,38 @@ async function collectSalesforcePerspectiveInPage() {
       roleName: record.UserRole && record.UserRole.Name || "No role assigned",
       source: "REST SOQL User query"
     };
+  }
+
+  async function getPermissionSets(apiVersion, user) {
+    if (!user || !user.id || !isSalesforceId(user.id)) {
+      return [];
+    }
+
+    const soql = [
+      "SELECT Id, PermissionSetId, PermissionSet.Name, PermissionSet.Label,",
+      "PermissionSet.NamespacePrefix, PermissionSet.IsOwnedByProfile",
+      "FROM PermissionSetAssignment",
+      `WHERE AssigneeId = '${soqlString(user.id)}'`,
+      "AND PermissionSet.IsOwnedByProfile = false",
+      "ORDER BY PermissionSet.Label"
+    ].join(" ");
+    const records = await attempt("Permission set assignments", () => queryAll(apiVersion, soql));
+
+    if (!Array.isArray(records)) {
+      return [];
+    }
+
+    return records.map((record) => {
+      const permissionSet = record.PermissionSet || {};
+      return {
+        assignmentId: record.Id || null,
+        id: record.PermissionSetId || null,
+        label: permissionSet.Label || permissionSet.Name || record.PermissionSetId || "Permission Set",
+        name: permissionSet.Name || null,
+        namespacePrefix: permissionSet.NamespacePrefix || null,
+        source: "REST SOQL PermissionSetAssignment query"
+      };
+    });
   }
 
   async function resolveObjectFromRecordPrefix(apiVersion, recordId) {
@@ -313,6 +349,7 @@ async function collectSalesforcePerspectiveInPage() {
           id: record.Id || null,
           name: record.Label || record.DeveloperName || record.DurableId,
           developerName: record.DeveloperName || null,
+          apiName: record.DurableId || record.DeveloperName || appKey || null,
           durableId: record.DurableId || null,
           source: "Tooling API AppDefinition"
         };
@@ -324,6 +361,7 @@ async function collectSalesforcePerspectiveInPage() {
         id: null,
         name: domName,
         developerName: null,
+        apiName: appKey || null,
         durableId: appKey || null,
         source: "Lightning navigation DOM"
       };
@@ -333,6 +371,7 @@ async function collectSalesforcePerspectiveInPage() {
       id: null,
       name: appKey || "Unavailable",
       developerName: null,
+      apiName: appKey || null,
       durableId: appKey || null,
       source: appKey ? "Lightning URL app key" : "No current app marker found"
     };
@@ -404,6 +443,254 @@ async function collectSalesforcePerspectiveInPage() {
     };
   }
 
+  async function resolveLightningRecordPage(apiVersion, parsedPage, user, recordType, app) {
+    if (!parsedPage.objectApiName || parsedPage.pageType !== "record") {
+      return {
+        id: null,
+        name: "Not on a Lightning record page",
+        apiName: null,
+        source: "URL context"
+      };
+    }
+
+    const appAssignment = await resolveAppLightningRecordPage(apiVersion, parsedPage, user, recordType, app);
+    if (appAssignment) {
+      return appAssignment;
+    }
+
+    const profileAssignment = await resolveProfileLightningRecordPage(apiVersion, parsedPage, user, recordType);
+    if (profileAssignment) {
+      return profileAssignment;
+    }
+
+    const candidates = await getObjectFlexiPages(apiVersion, parsedPage.objectApiName);
+    if (candidates.length === 1) {
+      return {
+        ...candidates[0],
+        source: "Tooling API FlexiPage object lookup"
+      };
+    }
+
+    if (candidates.length > 1) {
+      return {
+        id: null,
+        name: "Multiple Lightning record pages found",
+        apiName: candidates.map((candidate) => candidate.apiName).filter(Boolean).join(", "),
+        source: "Tooling API FlexiPage object lookup; assignment metadata was unavailable"
+      };
+    }
+
+    return {
+      id: null,
+      name: "Unavailable",
+      apiName: null,
+      source: "No Lightning record page metadata was returned"
+    };
+  }
+
+  async function resolveAppLightningRecordPage(apiVersion, parsedPage, user, recordType, app) {
+    const appNames = unique([
+      app && app.apiName,
+      app && app.durableId,
+      app && app.developerName,
+      parsedPage.appKey
+    ].filter(Boolean).flatMap((name) => [name, String(name).replace(/^standard__/, "")]));
+    const safeAppNames = appNames.filter((name) => /^[A-Za-z][A-Za-z0-9_]*(__[A-Za-z][A-Za-z0-9_]*)?$/.test(name));
+
+    if (!safeAppNames.length) {
+      return null;
+    }
+
+    const soql = [
+      "SELECT Id, DeveloperName",
+      "FROM CustomApplication",
+      `WHERE ${safeAppNames.map((name) => `DeveloperName = '${soqlString(name)}'`).join(" OR ")}`,
+      "LIMIT 5"
+    ].join(" ");
+    const response = await attempt("Tooling CustomApplication lookup", () => toolingQuery(apiVersion, soql));
+    const records = response && response.records || [];
+
+    for (const record of records) {
+      const application = await attempt(
+        `Tooling CustomApplication metadata ${record.DeveloperName || record.Id}`,
+        () => toolingObject(apiVersion, "CustomApplication", record.Id)
+      );
+      const override = findBestLightningRecordPageOverride(application && application.Metadata, parsedPage, user, recordType);
+      if (override) {
+        return resolveFlexiPageFromOverride(apiVersion, override, "CustomApplication profileActionOverrides metadata");
+      }
+    }
+
+    return null;
+  }
+
+  async function resolveProfileLightningRecordPage(apiVersion, parsedPage, user, recordType) {
+    if (!user || !user.profileId) {
+      return null;
+    }
+
+    const profile = await attempt("Tooling Profile metadata", () => toolingObject(apiVersion, "Profile", user.profileId));
+    const override = findBestLightningRecordPageOverride(profile && profile.Metadata, parsedPage, user, recordType);
+    return override
+      ? resolveFlexiPageFromOverride(apiVersion, override, "Profile profileActionOverrides metadata")
+      : null;
+  }
+
+  async function resolveFlexiPageFromOverride(apiVersion, override, source) {
+    const page = await getFlexiPageByName(apiVersion, override.content);
+    if (page) {
+      return {
+        ...page,
+        source
+      };
+    }
+
+    return {
+      id: null,
+      name: override.content || "Assigned Lightning record page",
+      apiName: override.content || null,
+      developerName: override.content || null,
+      source: `${source}; FlexiPage lookup unavailable`
+    };
+  }
+
+  async function getFlexiPageByName(apiVersion, pageName) {
+    if (!pageName) {
+      return null;
+    }
+
+    const names = unique([
+      pageName,
+      String(pageName).split(".").pop(),
+      String(pageName).replace(/^[A-Za-z0-9]+__/, "")
+    ].filter(Boolean));
+    const conditions = names.flatMap((name) => [
+      `DeveloperName = '${soqlString(name)}'`,
+      `MasterLabel = '${soqlString(name)}'`
+    ]);
+
+    if (isSalesforceId(pageName)) {
+      conditions.push(`Id = '${soqlString(pageName)}'`);
+    }
+
+    const soql = [
+      "SELECT Id, DeveloperName, MasterLabel, NamespacePrefix, Type, EntityDefinitionId",
+      "FROM FlexiPage",
+      "WHERE Type = 'RecordPage'",
+      `AND (${conditions.join(" OR ")})`,
+      "LIMIT 5"
+    ].join(" ");
+    const response = await attempt("Tooling FlexiPage assigned page lookup", () => toolingQuery(apiVersion, soql));
+    const record = response && response.records && response.records[0];
+    return record ? shapeFlexiPage(record, "Tooling API FlexiPage lookup") : null;
+  }
+
+  async function getObjectFlexiPages(apiVersion, objectApiName) {
+    let soql = [
+      "SELECT Id, DeveloperName, MasterLabel, NamespacePrefix, Type, EntityDefinitionId",
+      "FROM FlexiPage",
+      "WHERE Type = 'RecordPage'",
+      `AND EntityDefinition.QualifiedApiName = '${soqlString(objectApiName)}'`,
+      "ORDER BY MasterLabel"
+    ].join(" ");
+    let response = await attempt("Tooling FlexiPage object lookup", () => toolingQuery(apiVersion, soql));
+    let records = response && response.records || [];
+
+    if (!records.length) {
+      soql = [
+        "SELECT Id, DeveloperName, MasterLabel, NamespacePrefix, Type, EntityDefinitionId",
+        "FROM FlexiPage",
+        "WHERE Type = 'RecordPage'",
+        `AND EntityDefinitionId = '${soqlString(objectApiName)}'`,
+        "ORDER BY MasterLabel"
+      ].join(" ");
+      response = await attempt("Tooling FlexiPage EntityDefinitionId lookup", () => toolingQuery(apiVersion, soql));
+      records = response && response.records || [];
+    }
+
+    return records.map((record) => shapeFlexiPage(record, "Tooling API FlexiPage object lookup"));
+  }
+
+  function findBestLightningRecordPageOverride(metadata, parsedPage, user, recordType) {
+    const overrides = [
+      ...normalizeList(metadata && metadata.profileActionOverrides),
+      ...normalizeList(metadata && metadata.actionOverrides)
+    ];
+    let best = null;
+
+    for (const override of overrides) {
+      if (!override || !override.content) {
+        continue;
+      }
+      if (!matchesMetadataValue(override.actionName, "View") || !matchesMetadataValue(override.type, "Flexipage")) {
+        continue;
+      }
+      if (!matchesMetadataValue(override.pageOrSobjectType, parsedPage.objectApiName)) {
+        continue;
+      }
+      if (override.formFactor && !matchesMetadataValue(override.formFactor, "Large")) {
+        continue;
+      }
+
+      const recordTypeScore = actionOverrideRecordTypeScore(override.recordType, parsedPage.objectApiName, recordType);
+      const profileScore = actionOverrideProfileScore(override.profile, user);
+      if (recordTypeScore === null || profileScore === null) {
+        continue;
+      }
+
+      const score = recordTypeScore + profileScore + (override.profile ? 2 : 0);
+      if (!best || score > best.score) {
+        best = { score, override };
+      }
+    }
+
+    return best && best.override || null;
+  }
+
+  function actionOverrideRecordTypeScore(overrideRecordType, objectApiName, recordType) {
+    if (!overrideRecordType) {
+      return 0;
+    }
+
+    const candidates = [
+      recordType && recordType.developerName,
+      recordType && recordType.name,
+      recordType && recordType.developerName && `${objectApiName}.${recordType.developerName}`,
+      recordType && recordType.developerName && `${objectApiName}.${recordType.developerName.replace(/^standard__/, "")}`
+    ].filter(Boolean);
+
+    return candidates.some((candidate) => matchesMetadataValue(overrideRecordType, candidate)) ? 8 : null;
+  }
+
+  function actionOverrideProfileScore(overrideProfile, user) {
+    if (!overrideProfile) {
+      return 0;
+    }
+
+    const candidates = [
+      user && user.profileName,
+      user && user.profileId
+    ].filter(Boolean);
+
+    return candidates.some((candidate) => matchesMetadataValue(overrideProfile, candidate)) ? 4 : null;
+  }
+
+  function shapeFlexiPage(record, source) {
+    const developerName = record.DeveloperName || null;
+    const apiName = developerName && record.NamespacePrefix
+      ? `${record.NamespacePrefix}__${developerName}`
+      : developerName;
+
+    return {
+      id: record.Id || null,
+      name: record.MasterLabel || developerName || record.Id || "Lightning record page",
+      apiName: apiName || null,
+      developerName,
+      namespacePrefix: record.NamespacePrefix || null,
+      source
+    };
+  }
+
   async function apiFetch(path) {
     const response = await fetch(path, {
       method: "GET",
@@ -434,8 +721,29 @@ async function collectSalesforcePerspectiveInPage() {
     return apiFetch(`/services/data/v${apiVersion}/query/?q=${encodeURIComponent(soql)}`);
   }
 
+  async function queryAll(apiVersion, soql) {
+    let response = await query(apiVersion, soql);
+    const records = [];
+
+    while (response) {
+      if (Array.isArray(response.records)) {
+        records.push(...response.records);
+      }
+      if (response.done || !response.nextRecordsUrl) {
+        break;
+      }
+      response = await apiFetch(response.nextRecordsUrl);
+    }
+
+    return records;
+  }
+
   async function toolingQuery(apiVersion, soql) {
     return apiFetch(`/services/data/v${apiVersion}/tooling/query/?q=${encodeURIComponent(soql)}`);
+  }
+
+  async function toolingObject(apiVersion, type, id) {
+    return apiFetch(`/services/data/v${apiVersion}/tooling/sobjects/${encodeURIComponent(type)}/${encodeURIComponent(id)}`);
   }
 
   async function attempt(label, task) {
@@ -584,6 +892,21 @@ async function collectSalesforcePerspectiveInPage() {
 
   function isSafeObjectApiName(value) {
     return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(value);
+  }
+
+  function normalizeList(value) {
+    if (!value) {
+      return [];
+    }
+    return Array.isArray(value) ? value : [value];
+  }
+
+  function matchesMetadataValue(value, expected) {
+    return cleanText(value).toLowerCase() === cleanText(expected).toLowerCase();
+  }
+
+  function unique(values) {
+    return [...new Set(values.filter(Boolean))];
   }
 
   function soqlString(value) {
