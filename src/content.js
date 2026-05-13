@@ -12,6 +12,7 @@
   let isOpen = false;
   let lastContext = null;
   let activeTab = "perspective";
+  let notesVisible = false;
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message && message.type === "SF2P_TOGGLE_PANEL") {
@@ -150,7 +151,10 @@
     if (activeTab === "permissionSets") {
       fragment.append(permissionSetsTab(context.permissionSets || []));
       if (context.warnings && context.warnings.length) {
-        fragment.append(warningsList(context.warnings));
+        fragment.append(notesToggle(context.warnings));
+        if (notesVisible) {
+          fragment.append(warningsList(context.warnings));
+        }
       }
       replaceChildren(body, fragment);
       return;
@@ -161,7 +165,10 @@
     fragment.append(recordSummary(context));
 
     if (context.warnings && context.warnings.length) {
-      fragment.append(warningsList(context.warnings));
+      fragment.append(notesToggle(context.warnings));
+      if (notesVisible) {
+        fragment.append(warningsList(context.warnings));
+      }
     }
 
     replaceChildren(body, fragment);
@@ -569,6 +576,26 @@
     return section;
   }
 
+  function notesToggle(warnings) {
+    const section = document.createElement("section");
+    section.className = "sf2p-notes-toggle";
+
+    const summary = document.createElement("span");
+    summary.textContent = `${warnings.length} note${warnings.length === 1 ? "" : "s"} available`;
+
+    const toggle = button(notesVisible ? "Hide Notes" : "Show Notes", "sf2p-notes-button");
+    toggle.setAttribute("aria-expanded", String(notesVisible));
+    toggle.addEventListener("click", () => {
+      notesVisible = !notesVisible;
+      if (lastContext) {
+        renderContext(lastContext);
+      }
+    });
+
+    section.append(summary, toggle);
+    return section;
+  }
+
   function button(label, className) {
     const element = document.createElement("button");
     element.type = "button";
@@ -752,6 +779,7 @@
       .sf2p-card,
       .sf2p-table-section,
       .sf2p-summary,
+      .sf2p-notes-toggle,
       .sf2p-warnings,
       .sf2p-error,
       .sf2p-state {
@@ -851,6 +879,29 @@
       .sf2p-warnings {
         background: #fff8e6;
         border-color: #f9e3b6;
+      }
+
+      .sf2p-notes-toggle {
+        align-items: center;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .sf2p-notes-toggle span {
+        color: #5c5c5c;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .sf2p-notes-button {
+        background: #fff;
+        border-color: #0176d3;
+        color: #0176d3;
+      }
+
+      .sf2p-notes-button:hover {
+        background: #eef4ff;
       }
 
       .sf2p-warnings ul {
