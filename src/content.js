@@ -62,6 +62,7 @@
 
     const actions = document.createElement("div");
     actions.className = "sf2p-actions";
+    const saveAs = saveAsControl();
     const refresh = button("Refresh", "sf2p-refresh");
     refresh.addEventListener("click", refreshContext);
     const close = button("Close", "sf2p-close");
@@ -69,7 +70,7 @@
       isOpen = false;
       panelHost.dataset.open = "false";
     });
-    actions.append(refresh, close);
+    actions.append(saveAs, refresh, close);
     header.append(titleGroup, actions);
 
     const body = document.createElement("main");
@@ -187,6 +188,56 @@
     return element;
   }
 
+  function saveAsControl() {
+    const wrapper = document.createElement("div");
+    wrapper.className = "sf2p-save";
+
+    const trigger = button("Save As", "sf2p-save-trigger");
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", "false");
+
+    const menu = document.createElement("div");
+    menu.className = "sf2p-save-menu";
+    menu.setAttribute("role", "menu");
+    menu.hidden = true;
+
+    const excel = saveOption("Detailed Excel file", "excel");
+    const word = saveOption("Detailed Word doc", "word");
+    menu.append(excel, word);
+
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const shouldOpen = menu.hidden;
+      menu.hidden = !shouldOpen;
+      trigger.setAttribute("aria-expanded", String(shouldOpen));
+    });
+
+    wrapper.addEventListener("mouseleave", () => {
+      menu.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+    });
+
+    wrapper.append(trigger, menu);
+    return wrapper;
+  }
+
+  function saveOption(label, format) {
+    const element = button(label, "sf2p-save-option");
+    element.setAttribute("role", "menuitem");
+    element.addEventListener("click", async () => {
+      const menu = element.closest(".sf2p-save-menu");
+      const trigger = menu && menu.previousElementSibling;
+      if (menu) {
+        menu.hidden = true;
+      }
+      if (trigger) {
+        trigger.setAttribute("aria-expanded", "false");
+      }
+      await exportDetailedContext(format);
+    });
+    return element;
+  }
+
   function permissionSetsTab(permissionSets) {
     const fragment = document.createDocumentFragment();
     fragment.append(sectionIntro(`${permissionSets.length} permission set${permissionSets.length === 1 ? "" : "s"} assigned to this user`));
@@ -215,7 +266,7 @@
     return tableSection("Details", ["Item", "Value", "API Name / ID"], [
       ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType)],
       ["Profile", context.user && context.user.profileName, context.user && context.user.profileId],
-      ["App Name", context.app && context.app.name, null],
+      ["App Name", context.app && context.app.name, ""],
       ["Role", context.user && context.user.roleName, context.user && context.user.roleId],
       ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout)],
       ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, identifierLine(context.lightningRecordPage)]
@@ -248,7 +299,7 @@
       const rowElement = document.createElement("tr");
       for (const value of row) {
         const cell = document.createElement("td");
-        cell.textContent = value || "Unavailable";
+        cell.textContent = value === "" ? "" : value || "Unavailable";
         rowElement.append(cell);
       }
       tbody.append(rowElement);
@@ -272,6 +323,148 @@
       value.developerName && value.developerName !== value.apiName ? value.developerName : null,
       value.durableId && value.durableId !== value.id && value.durableId !== value.apiName ? value.durableId : null
     ].filter(Boolean).join(" | ");
+  }
+
+  async function exportDetailedContext(format) {
+    if (!lastContext) {
+      await refreshContext();
+    }
+    if (!lastContext) {
+      return;
+    }
+
+    const file = format === "word"
+      ? buildWordExport(lastContext)
+      : buildExcelExport(lastContext);
+    downloadFile(file.content, file.mimeType, file.fileName);
+  }
+
+  function buildExcelExport(context) {
+    return {
+      content: buildExportHtml(context, "Salesforce Perspectives Detailed Export"),
+      mimeType: "application/vnd.ms-excel;charset=utf-8",
+      fileName: `${exportFileBaseName(context)}.xls`
+    };
+  }
+
+  function buildWordExport(context) {
+    return {
+      content: buildExportHtml(context, "Salesforce Perspectives Detailed Export"),
+      mimeType: "application/msword;charset=utf-8",
+      fileName: `${exportFileBaseName(context)}.doc`
+    };
+  }
+
+  function buildExportHtml(context, titleText) {
+    const generatedAt = context.generatedAt || new Date().toISOString();
+    return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtml(titleText)}</title>
+  <style>
+    body { color: #181818; font-family: Arial, Helvetica, sans-serif; font-size: 12px; }
+    h1 { color: #032d60; font-size: 22px; margin: 0 0 6px; }
+    h2 { color: #032d60; font-size: 16px; margin: 22px 0 8px; }
+    p { margin: 0 0 12px; }
+    table { border-collapse: collapse; margin-bottom: 16px; width: 100%; }
+    th { background: #032d60; color: #ffffff; font-weight: 700; text-align: left; }
+    th, td { border: 1px solid #d8dde6; padding: 7px; vertical-align: top; }
+    td { mso-number-format: "\\@"; }
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(titleText)}</h1>
+  <p>Generated at ${escapeHtml(generatedAt)}</p>
+  ${exportTable("Perspective", ["Item", "Value", "API Name / ID", "Source"], perspectiveExportRows(context))}
+  ${exportTable("Page", ["Field", "Value"], pageExportRows(context))}
+  ${exportTable("Permission Sets", ["Label", "API Name", "Namespace", "Permission Set ID", "Assignment ID"], permissionSetExportRows(context))}
+  ${exportTable("Notes", ["Note"], notesExportRows(context))}
+</body>
+</html>`;
+  }
+
+  function perspectiveExportRows(context) {
+    return [
+      ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType), context.recordType && context.recordType.source],
+      ["Profile", context.user && context.user.profileName, context.user && context.user.profileId, context.user && context.user.source],
+      ["App Name", context.app && context.app.name, "", context.app && context.app.source],
+      ["Role", context.user && context.user.roleName, context.user && context.user.roleId, context.user && context.user.source],
+      ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout), context.pageLayout && context.pageLayout.source],
+      ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, identifierLine(context.lightningRecordPage), context.lightningRecordPage && context.lightningRecordPage.source]
+    ];
+  }
+
+  function pageExportRows(context) {
+    return [
+      ["Object", context.record && context.record.objectApiName],
+      ["Record ID", context.record && context.record.id],
+      ["Page type", context.record && context.record.pageType],
+      ["Org host", context.org && context.org.host],
+      ["API version", context.org && context.org.apiVersion],
+      ["Current URL", context.currentUrl],
+      ["Read at", context.generatedAt]
+    ];
+  }
+
+  function permissionSetExportRows(context) {
+    const permissionSets = context.permissionSets || [];
+    if (!permissionSets.length) {
+      return [["None returned", "", "", "", ""]];
+    }
+
+    return permissionSets.map((permissionSet) => [
+      permissionSet.label,
+      permissionSet.name,
+      permissionSet.namespacePrefix,
+      permissionSet.id,
+      permissionSet.assignmentId
+    ]);
+  }
+
+  function notesExportRows(context) {
+    const warnings = context.warnings || [];
+    return warnings.length ? warnings.map((warning) => [warning]) : [["No notes."]];
+  }
+
+  function exportTable(titleText, headers, rows) {
+    const headerHtml = headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("");
+    const bodyHtml = rows.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(exportValue(value))}</td>`).join("")}</tr>`).join("");
+    return `<h2>${escapeHtml(titleText)}</h2><table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
+  }
+
+  function exportValue(value) {
+    if (value === "") {
+      return "";
+    }
+    return value || "Unavailable";
+  }
+
+  function exportFileBaseName(context) {
+    const timestamp = String(context.generatedAt || new Date().toISOString()).replace(/[:.]/g, "-");
+    return `salesforce-perspectives-${timestamp}`;
+  }
+
+  function downloadFile(content, mimeType, fileName) {
+    const blob = new Blob(["\ufeff", content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    link.style.display = "none";
+    document.documentElement.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function sectionIntro(text) {
@@ -489,6 +682,10 @@
         gap: 8px;
       }
 
+      .sf2p-save {
+        position: relative;
+      }
+
       button {
         appearance: none;
         background: rgba(255, 255, 255, 0.12);
@@ -504,6 +701,39 @@
 
       button:hover {
         background: rgba(255, 255, 255, 0.22);
+      }
+
+      .sf2p-save-menu {
+        background: #fff;
+        border: 1px solid #d8dde6;
+        border-radius: 10px;
+        box-shadow: 0 8px 24px rgba(24, 24, 24, 0.18);
+        min-width: 190px;
+        padding: 6px;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 8px);
+        z-index: 1;
+      }
+
+      .sf2p-save-menu[hidden] {
+        display: none;
+      }
+
+      .sf2p-save-option {
+        background: transparent;
+        border: 0;
+        border-radius: 8px;
+        color: #181818;
+        display: block;
+        padding: 9px 10px;
+        text-align: left;
+        width: 100%;
+      }
+
+      .sf2p-save-option:hover {
+        background: #eef4ff;
+        color: #032d60;
       }
 
       .sf2p-tabs {

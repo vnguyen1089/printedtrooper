@@ -10,6 +10,8 @@ Salesforce Perspectives is a Manifest V3 Chrome extension that opens a right-sid
 - Lightning record page and API name
 - Assigned permission sets
 
+The panel also includes a **Save As** menu for downloading a detailed Excel-compatible `.xls` file or Word-compatible `.doc` file.
+
 ## How it works
 
 The content script owns the side-panel UI. When you click the extension icon, the background service worker toggles the panel and handles collection requests.
