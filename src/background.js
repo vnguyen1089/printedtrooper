@@ -23,7 +23,7 @@ chrome.action.onClicked.addListener(async (tab) => {
       });
       await sendToggle(tab.id);
     } catch (injectionError) {
-      console.error("Salesforce 2 Perspective could not open the side panel.", injectionError);
+      console.error("Salesforce Perspectives could not open the side panel.", injectionError);
       await flashBadge("!");
     }
   }
@@ -38,7 +38,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     apiFetchFromExtension(message.currentUrl || sender.tab && sender.tab.url, message.path)
       .then((body) => sendResponse({ ok: true, body }))
       .catch((error) => {
-        console.error("Salesforce 2 Perspective API proxy failed.", error);
+        console.error("Salesforce Perspectives API proxy failed.", error);
         sendResponse({ ok: false, error: error.message || String(error) });
       });
     return true;
@@ -57,7 +57,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   collectContext(tabId)
     .then((context) => sendResponse({ ok: true, context }))
     .catch((error) => {
-      console.error("Salesforce 2 Perspective collection failed.", error);
+      console.error("Salesforce Perspectives collection failed.", error);
       sendResponse({ ok: false, error: error.message || String(error) });
     });
 
@@ -476,6 +476,17 @@ async function collectSalesforcePerspectiveInPage() {
     const appKey = parsedPage.appKey || appKeyFromNavigationLinks();
     const domName = appNameFromDom();
 
+    if (domName) {
+      return {
+        id: null,
+        name: domName,
+        developerName: null,
+        apiName: null,
+        durableId: appKey || null,
+        source: "Lightning header"
+      };
+    }
+
     if (appKey) {
       const conditions = [
         `DurableId = '${soqlString(appKey)}'`,
@@ -506,17 +517,6 @@ async function collectSalesforcePerspectiveInPage() {
           source: "Tooling API AppDefinition"
         };
       }
-    }
-
-    if (domName) {
-      return {
-        id: null,
-        name: domName,
-        developerName: null,
-        apiName: appKey || null,
-        durableId: appKey || null,
-        source: "Lightning navigation DOM"
-      };
     }
 
     return {
@@ -1019,6 +1019,10 @@ async function collectSalesforcePerspectiveInPage() {
     const selectors = [
       ".slds-context-bar__app-name .slds-truncate",
       ".slds-context-bar__app-name",
+      "one-app-nav-bar .slds-context-bar__app-name .slds-truncate",
+      "one-app-nav-bar .slds-context-bar__app-name",
+      "one-appnav .slds-context-bar__app-name .slds-truncate",
+      "one-appnav .slds-context-bar__app-name",
       ".slds-context-bar__primary .slds-context-bar__label-action .slds-truncate",
       ".slds-context-bar__primary .slds-context-bar__label-action",
       "one-app-nav-bar-item-root a[href*='/lightning/app/'] .slds-truncate",
@@ -1029,14 +1033,103 @@ async function collectSalesforcePerspectiveInPage() {
     ];
 
     for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      const text = element && cleanText(element.textContent || element.getAttribute("title"));
-      if (text && text.toLowerCase() !== "app launcher") {
+      for (const element of document.querySelectorAll(selector)) {
+        const text = appNameFromElement(element);
+        if (text) {
+          return text;
+        }
+      }
+    }
+
+    return appNameNearLauncher();
+  }
+
+  function appNameFromElement(element) {
+    if (!element || !isVisibleElement(element)) {
+      return null;
+    }
+
+    const values = [
+      element.getAttribute("title"),
+      element.getAttribute("aria-label"),
+      element.textContent
+    ];
+
+    for (const value of values) {
+      const text = cleanText(value);
+      if (isLikelyAppName(text)) {
         return text;
       }
     }
 
     return null;
+  }
+
+  function appNameNearLauncher() {
+    const launcher = document.querySelector([
+      "button[title*='App Launcher']",
+      "button[aria-label*='App Launcher']",
+      ".slds-icon-waffle_container",
+      ".slds-icon-waffle"
+    ].join(","));
+
+    if (!launcher || typeof launcher.getBoundingClientRect !== "function") {
+      return null;
+    }
+
+    const launcherRect = launcher.getBoundingClientRect();
+    const candidates = [...document.querySelectorAll("a, button, span, div")]
+      .map((element) => ({
+        element,
+        text: appNameFromElement(element),
+        rect: element.getBoundingClientRect()
+      }))
+      .filter((candidate) => {
+        if (!candidate.text || !candidate.rect || candidate.rect.width <= 0 || candidate.rect.height <= 0) {
+          return false;
+        }
+        const verticallyAligned = candidate.rect.bottom >= launcherRect.top - 12 && candidate.rect.top <= launcherRect.bottom + 12;
+        const toTheRight = candidate.rect.left >= launcherRect.right - 8 && candidate.rect.left <= launcherRect.right + 180;
+        const inHeader = candidate.rect.top <= 140;
+        return verticallyAligned && toTheRight && inHeader;
+      })
+      .sort((left, right) => left.rect.left - right.rect.left);
+
+    return candidates.length ? candidates[0].text : null;
+  }
+
+  function isLikelyAppName(text) {
+    if (!text) {
+      return false;
+    }
+
+    const normalized = text.toLowerCase();
+    const ignored = new Set([
+      "app launcher",
+      "home",
+      "leads",
+      "tasks",
+      "files",
+      "accounts",
+      "contacts",
+      "opportunities",
+      "campaigns",
+      "dashboards",
+      "reports",
+      "chatter"
+    ]);
+
+    return text.length <= 60 && !ignored.has(normalized);
+  }
+
+  function isVisibleElement(element) {
+    if (!element || typeof element.getBoundingClientRect !== "function") {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
   }
 
   function appKeyFromNavigationLinks() {

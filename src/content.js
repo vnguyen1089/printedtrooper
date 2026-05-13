@@ -57,7 +57,7 @@
     eyebrow.className = "sf2p-eyebrow";
     eyebrow.textContent = "Salesforce";
     const title = document.createElement("h1");
-    title.textContent = "2 Perspective";
+    title.textContent = "Perspectives";
     titleGroup.append(eyebrow, title);
 
     const actions = document.createElement("div");
@@ -169,7 +169,7 @@
   function tabs() {
     const nav = document.createElement("nav");
     nav.className = "sf2p-tabs";
-    nav.setAttribute("aria-label", "Salesforce 2 Perspective tabs");
+    nav.setAttribute("aria-label", "Salesforce Perspectives tabs");
     nav.append(tabButton("Perspective", "perspective"), tabButton("Permission Sets", "permissionSets"));
     return nav;
   }
