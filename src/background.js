@@ -330,14 +330,16 @@ async function collectSalesforcePerspectiveInPage() {
 
   async function getCurrentUser(apiVersion) {
     const pageUser = getUserFromPageGlobals();
-    const pageUserId = pageUser && pageUser.id;
     const userInfo = await attempt("OAuth user info", () => apiFetch("/services/oauth2/userinfo"));
-    const userId = pageUserId || userInfo && (userInfo.user_id || userInfo.userId || idFromIdentityUrl(userInfo.sub));
+    const chatterUser = await attempt("Chatter current user", () => apiFetch(`/services/data/v${apiVersion}/chatter/users/me`));
+    const userId = chatterUser && chatterUser.id
+      || userInfo && (userInfo.user_id || userInfo.userId || idFromIdentityUrl(userInfo.sub))
+      || pageUser && pageUser.id;
 
     if (!userId || !isSalesforceId(userId)) {
       return {
         id: userId || null,
-        name: pageUser && pageUser.name || userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
+        name: currentUserName(chatterUser, pageUser, userInfo),
         profileId: pageUser && pageUser.profileId || null,
         profileName: pageUser && pageUser.profileName || "Unavailable",
         roleId: pageUser && pageUser.roleId || null,
@@ -356,16 +358,16 @@ async function collectSalesforcePerspectiveInPage() {
     const record = response && response.records && response.records[0];
 
     if (!response) {
-      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, "Current user id; SOQL user lookup unavailable");
+      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, "Current user id; SOQL user lookup unavailable");
     }
 
     if (!record) {
-      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, "Current user id; SOQL user lookup returned no rows");
+      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, "Current user id; SOQL user lookup returned no rows");
     }
 
     return {
       id: record.Id,
-      name: record.Name || pageUser && pageUser.name || userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
+      name: record.Name || currentUserName(chatterUser, pageUser, userInfo),
       profileId: record.ProfileId || pageUser && pageUser.profileId || null,
       profileName: record.Profile && record.Profile.Name || pageUser && pageUser.profileName || "Unavailable",
       roleId: record.UserRoleId || pageUser && pageUser.roleId || null,
@@ -374,7 +376,7 @@ async function collectSalesforcePerspectiveInPage() {
     };
   }
 
-  async function resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, source) {
+  async function resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, source) {
     const userRecord = await attempt(
       "REST User sObject lookup",
       () => apiFetch(`/services/data/v${apiVersion}/sobjects/User/${encodeURIComponent(userId)}?fields=Id,Name,ProfileId,UserRoleId`)
@@ -390,13 +392,20 @@ async function collectSalesforcePerspectiveInPage() {
 
     return {
       id: userRecord && userRecord.Id || userId,
-      name: userRecord && userRecord.Name || pageUser && pageUser.name || userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
+      name: userRecord && userRecord.Name || currentUserName(chatterUser, pageUser, userInfo),
       profileId,
       profileName: profile && profile.Name || pageUser && pageUser.profileName || (profileId ? profileId : "Unavailable"),
       roleId,
       roleName: role && role.Name || pageUser && pageUser.roleName || (roleId ? roleId : "Unavailable"),
       source
     };
+  }
+
+  function currentUserName(chatterUser, pageUser, userInfo) {
+    return chatterUser && (chatterUser.name || chatterUser.displayName)
+      || pageUser && pageUser.name
+      || userInfo && (userInfo.name || userInfo.preferred_username)
+      || "Unavailable";
   }
 
   async function getPermissionSets(apiVersion, user) {
@@ -562,11 +571,24 @@ async function collectSalesforcePerspectiveInPage() {
   }
 
   async function resolvePageLayout(apiVersion, parsedPage, user, recordType) {
-    if (!parsedPage.objectApiName || !user || !user.profileId) {
+    if (!parsedPage.objectApiName) {
       return {
         id: null,
         name: "Unavailable",
-        source: "Need an object and profile to resolve layout assignment"
+        source: "Need an object to resolve layout"
+      };
+    }
+
+    if (!user || !user.profileId) {
+      const uiLayout = await resolveUiApiLayout(apiVersion, parsedPage, recordType);
+      if (uiLayout) {
+        return uiLayout;
+      }
+
+      return {
+        id: null,
+        name: "Unavailable",
+        source: "Need a profile to resolve layout assignment"
       };
     }
 
@@ -606,6 +628,19 @@ async function collectSalesforcePerspectiveInPage() {
       };
     }
 
+    const uiLayout = await resolveUiApiLayout(apiVersion, parsedPage, recordType);
+    if (uiLayout) {
+      return uiLayout;
+    }
+
+    return {
+      id: null,
+      name: "Unavailable",
+      source: "No layout assignment was returned"
+    };
+  }
+
+  async function resolveUiApiLayout(apiVersion, parsedPage, recordType) {
     const recordTypeParam = recordType && recordType.id ? `&recordTypeId=${encodeURIComponent(recordType.id)}` : "";
     const layout = await attempt(
       "UI API layout fallback",
@@ -620,11 +655,7 @@ async function collectSalesforcePerspectiveInPage() {
       };
     }
 
-    return {
-      id: null,
-      name: "Unavailable",
-      source: "No layout assignment was returned"
-    };
+    return null;
   }
 
   async function resolveLightningRecordPage(apiVersion, parsedPage, user, recordType, app) {
@@ -645,6 +676,11 @@ async function collectSalesforcePerspectiveInPage() {
     const profileAssignment = await resolveProfileLightningRecordPage(apiVersion, parsedPage, user, recordType);
     if (profileAssignment) {
       return profileAssignment;
+    }
+
+    const pageMetadata = lightningRecordPageFromLoadedMetadata(parsedPage, recordType);
+    if (pageMetadata) {
+      return pageMetadata;
     }
 
     const candidates = await getObjectFlexiPages(apiVersion, parsedPage.objectApiName);
@@ -919,6 +955,77 @@ async function collectSalesforcePerspectiveInPage() {
     }
 
     return score;
+  }
+
+  function lightningRecordPageFromLoadedMetadata(parsedPage, recordType) {
+    const text = loadedMetadataText();
+    if (!text) {
+      return null;
+    }
+
+    const names = unique([
+      ...matchesForPattern(text, /\b([A-Za-z][A-Za-z0-9]*_Record_Page[0-9A-Za-z_]*)\b/g),
+      ...matchesForPattern(text, /\b([A-Za-z][A-Za-z0-9]*RecordPage[0-9A-Za-z_]*)\b/g),
+      ...matchesForPattern(text, /"developerName"\s*:\s*"([^"]+Record[^"]*)"/g),
+      ...matchesForPattern(text, /"fullName"\s*:\s*"([^"]+Record[^"]*)"/g)
+    ]).filter((name) => isLikelyFlexiPageName(name));
+
+    if (!names.length) {
+      return null;
+    }
+
+    const candidates = names.map((name) => ({
+      id: null,
+      name: name.replace(/_/g, " "),
+      apiName: name,
+      developerName: name,
+      namespacePrefix: null,
+      source: "Loaded Lightning metadata scan"
+    }));
+    return chooseBestFlexiPageCandidate(candidates, parsedPage, recordType);
+  }
+
+  function loadedMetadataText() {
+    const values = [];
+
+    try {
+      values.push(document.documentElement && document.documentElement.innerHTML || "");
+    } catch (_error) {
+      // Ignore DOM read failures.
+    }
+
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try {
+        for (let index = 0; storage && index < storage.length; index += 1) {
+          const key = storage.key(index);
+          const value = storage.getItem(key);
+          if (/flexi|record|page|app|layout/i.test(`${key} ${value}`)) {
+            values.push(`${key} ${value}`);
+          }
+        }
+      } catch (_error) {
+        // Ignore storage access failures.
+      }
+    }
+
+    return values.join("\n").slice(0, 2000000);
+  }
+
+  function matchesForPattern(text, pattern) {
+    const results = [];
+    let match = pattern.exec(text);
+    while (match) {
+      results.push(match[1]);
+      match = pattern.exec(text);
+    }
+    return results;
+  }
+
+  function isLikelyFlexiPageName(value) {
+    if (!value || value.length > 120) {
+      return false;
+    }
+    return /^[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z][A-Za-z0-9_]*)?$/.test(value);
   }
 
   async function apiFetch(path) {
@@ -1250,6 +1357,14 @@ async function collectSalesforcePerspectiveInPage() {
     const text = document.body && document.body.innerText || "";
     const lines = text.split(/\r?\n/).map((line) => cleanText(line)).filter(Boolean);
     const navLabels = new Set(["home", "chatter", "leads", "accounts", "contacts", "opportunities", "cases"]);
+
+    const sameLineMatch = text.match(/\b([A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*){0,3})\s+Home\s+(?:Chatter|Leads|Accounts|Contacts|Opportunities|Cases)\b/);
+    if (sameLineMatch) {
+      const candidate = firstLikelyAppNameFromText(sameLineMatch[1]);
+      if (candidate) {
+        return candidate;
+      }
+    }
 
     for (let index = 0; index < Math.min(lines.length, 80); index += 1) {
       const normalized = lines[index].toLowerCase();
