@@ -646,10 +646,9 @@ async function collectSalesforcePerspectiveInPage() {
     }
 
     if (candidates.length > 1) {
+      const selected = chooseBestFlexiPageCandidate(candidates, parsedPage, recordType);
       return {
-        id: null,
-        name: "Multiple Lightning record pages found",
-        apiName: candidates.map((candidate) => candidate.apiName).filter(Boolean).join(", "),
+        ...selected,
         source: "Tooling API FlexiPage object lookup; assignment metadata was unavailable"
       };
     }
@@ -863,6 +862,40 @@ async function collectSalesforcePerspectiveInPage() {
       namespacePrefix: record.NamespacePrefix || null,
       source
     };
+  }
+
+  function chooseBestFlexiPageCandidate(candidates, parsedPage, recordType) {
+    const scored = candidates.map((candidate, index) => ({
+      candidate,
+      score: flexiPageCandidateScore(candidate, parsedPage, recordType),
+      index
+    }));
+    scored.sort((left, right) => right.score - left.score || left.index - right.index);
+    return scored[0].candidate;
+  }
+
+  function flexiPageCandidateScore(candidate, parsedPage, recordType) {
+    const haystack = [
+      candidate.apiName,
+      candidate.developerName,
+      candidate.name
+    ].filter(Boolean).join(" ").toLowerCase();
+    let score = 0;
+
+    if (parsedPage.objectApiName && haystack.includes(parsedPage.objectApiName.toLowerCase())) {
+      score += 4;
+    }
+    if (recordType && recordType.developerName && haystack.includes(recordType.developerName.toLowerCase())) {
+      score += 3;
+    }
+    if (recordType && recordType.name && haystack.includes(recordType.name.toLowerCase())) {
+      score += 2;
+    }
+    if (haystack.includes("record")) {
+      score += 1;
+    }
+
+    return score;
   }
 
   async function apiFetch(path) {

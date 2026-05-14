@@ -63,7 +63,7 @@
 
     const actions = document.createElement("div");
     actions.className = "sf2p-actions";
-    const saveAs = savePdfControl();
+    const saveAs = saveWordControl();
     const refresh = button("Refresh", "sf2p-refresh");
     refresh.addEventListener("click", refreshContext);
     const close = button("Close", "sf2p-close");
@@ -161,6 +161,7 @@
     }
 
     fragment.append(sectionIntro("Current Salesforce perspective"));
+    fragment.append(pageUrlCard(context.currentUrl));
     fragment.append(perspectiveTable(context));
     fragment.append(recordSummary(context));
 
@@ -195,10 +196,10 @@
     return element;
   }
 
-  function savePdfControl() {
+  function saveWordControl() {
     const element = button("Save As", "sf2p-save-trigger");
-    element.title = "Download detailed PDF";
-    element.addEventListener("click", exportDetailedPdf);
+    element.title = "Download detailed Word document";
+    element.addEventListener("click", exportDetailedWord);
     return element;
   }
 
@@ -227,14 +228,30 @@
   }
 
   function perspectiveTable(context) {
-    return tableSection("Details", ["Item", "Value", "API Name / ID", "Page URL"], [
-      ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType), context.currentUrl],
-      ["Profile", context.user && context.user.profileName, context.user && context.user.profileId, context.currentUrl],
-      ["App Name", context.app && context.app.name, "", context.currentUrl],
-      ["Role", context.user && context.user.roleName, context.user && context.user.roleId, context.currentUrl],
-      ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout), context.currentUrl],
-      ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, identifierLine(context.lightningRecordPage), context.currentUrl]
+    return tableSection("Details", ["Item", "Value", "API Name / ID"], [
+      ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType)],
+      ["Profile", context.user && context.user.profileName, context.user && context.user.profileId],
+      ["App Name", context.app && context.app.name, ""],
+      ["Role", context.user && context.user.roleName, context.user && context.user.roleId],
+      ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout)],
+      ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, lightningRecordPageIdentifier(context.lightningRecordPage)]
     ]);
+  }
+
+  function pageUrlCard(url) {
+    const section = document.createElement("section");
+    section.className = "sf2p-url-card";
+
+    const label = document.createElement("div");
+    label.className = "sf2p-label";
+    label.textContent = "Page URL";
+
+    const value = document.createElement("div");
+    value.className = "sf2p-url-value";
+    value.textContent = url || "Unavailable";
+
+    section.append(label, value);
+    return section;
   }
 
   function tableSection(titleText, headers, rows) {
@@ -289,7 +306,14 @@
     ].filter(Boolean).join(" | ");
   }
 
-  async function exportDetailedPdf() {
+  function lightningRecordPageIdentifier(value) {
+    if (!value) {
+      return null;
+    }
+    return value.apiName || value.developerName || value.id || null;
+  }
+
+  async function exportDetailedWord() {
     if (!lastContext) {
       await refreshContext();
     }
@@ -297,56 +321,18 @@
       return;
     }
 
-    const content = buildPdfDocument(buildPdfLines(lastContext));
-    downloadFile(content, "application/pdf", `${exportFileBaseName(lastContext)}.pdf`);
-  }
-
-  function buildPdfLines(context) {
-    const lines = [
-      "Salesforce Perspectives Detailed Export",
-      `Generated at: ${exportValue(context.generatedAt || new Date().toISOString())}`,
-      "",
-      "Perspective"
-    ];
-
-    for (const row of perspectiveExportRows(context)) {
-      lines.push(`${row[0]}: ${exportValue(row[1])}`);
-      lines.push(`  API Name / ID: ${exportValue(row[2])}`);
-      lines.push(`  Page URL: ${exportValue(row[3])}`);
-      lines.push(`  Source: ${exportValue(row[4])}`);
-    }
-
-    lines.push("", "Page");
-    for (const row of pageExportRows(context)) {
-      lines.push(`${row[0]}: ${exportValue(row[1])}`);
-    }
-
-    lines.push("", "Permission Sets");
-    const permissionSetRows = permissionSetExportRows(context);
-    for (const row of permissionSetRows) {
-      lines.push(`Label: ${exportValue(row[0])}`);
-      lines.push(`  API Name: ${exportValue(row[1])}`);
-      lines.push(`  Namespace: ${exportValue(row[2])}`);
-      lines.push(`  Permission Set ID: ${exportValue(row[3])}`);
-      lines.push(`  Assignment ID: ${exportValue(row[4])}`);
-    }
-
-    lines.push("", "Notes");
-    for (const row of notesExportRows(context)) {
-      lines.push(exportValue(row[0]));
-    }
-
-    return lines;
+    const content = buildWordDocument(lastContext);
+    downloadFile(content, "application/msword;charset=utf-8", `${exportFileBaseName(lastContext)}.doc`);
   }
 
   function perspectiveExportRows(context) {
     return [
-      ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType), context.currentUrl, context.recordType && context.recordType.source],
-      ["Profile", context.user && context.user.profileName, context.user && context.user.profileId, context.currentUrl, context.user && context.user.source],
-      ["App Name", context.app && context.app.name, "", context.currentUrl, context.app && context.app.source],
-      ["Role", context.user && context.user.roleName, context.user && context.user.roleId, context.currentUrl, context.user && context.user.source],
-      ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout), context.currentUrl, context.pageLayout && context.pageLayout.source],
-      ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, identifierLine(context.lightningRecordPage), context.currentUrl, context.lightningRecordPage && context.lightningRecordPage.source]
+      ["Record Type", context.recordType && context.recordType.name, identifierLine(context.recordType), context.recordType && context.recordType.source],
+      ["Profile", context.user && context.user.profileName, context.user && context.user.profileId, context.user && context.user.source],
+      ["App Name", context.app && context.app.name, "", context.app && context.app.source],
+      ["Role", context.user && context.user.roleName, context.user && context.user.roleId, context.user && context.user.source],
+      ["Page Layout", context.pageLayout && context.pageLayout.name, identifierLine(context.pageLayout), context.pageLayout && context.pageLayout.source],
+      ["Lightning Record Page", context.lightningRecordPage && context.lightningRecordPage.name, lightningRecordPageIdentifier(context.lightningRecordPage), context.lightningRecordPage && context.lightningRecordPage.source]
     ];
   }
 
@@ -382,86 +368,38 @@
     return warnings.length ? warnings.map((warning) => [warning]) : [["No notes."]];
   }
 
-  function buildPdfDocument(lines) {
-    const pages = paginatePdfLines(lines);
-    const objects = [];
-    const pageObjectIds = [];
-
-    objects.push("<< /Type /Catalog /Pages 2 0 R >>");
-    objects.push("");
-    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
-
-    for (const pageLines of pages) {
-      const pageId = objects.length + 1;
-      const contentId = pageId + 1;
-      pageObjectIds.push(pageId);
-      objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`);
-      objects.push(pdfStreamForLines(pageLines));
-    }
-
-    objects[1] = `<< /Type /Pages /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageObjectIds.length} >>`;
-
-    return serializePdf(objects);
+  function buildWordDocument(context) {
+    return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Salesforce Perspectives Detailed Export</title>
+  <style>
+    body { color: #181818; font-family: Arial, Helvetica, sans-serif; font-size: 12px; }
+    h1 { color: #032d60; font-size: 22px; margin: 0 0 6px; }
+    h2 { color: #032d60; font-size: 16px; margin: 22px 0 8px; }
+    p { margin: 0 0 12px; }
+    table { border-collapse: collapse; margin-bottom: 16px; width: 100%; }
+    th { background: #032d60; color: #ffffff; font-weight: 700; text-align: left; }
+    th, td { border: 1px solid #d8dde6; padding: 7px; vertical-align: top; }
+  </style>
+</head>
+<body>
+  <h1>Salesforce Perspectives Detailed Export</h1>
+  <p><strong>Generated at:</strong> ${escapeHtml(exportValue(context.generatedAt || new Date().toISOString()))}</p>
+  <p><strong>Page URL:</strong> ${escapeHtml(exportValue(context.currentUrl))}</p>
+  ${exportTable("Perspective", ["Item", "Value", "API Name / ID", "Source"], perspectiveExportRows(context))}
+  ${exportTable("Page", ["Field", "Value"], pageExportRows(context))}
+  ${exportTable("Permission Sets", ["Label", "API Name", "Namespace", "Permission Set ID", "Assignment ID"], permissionSetExportRows(context))}
+  ${exportTable("Notes", ["Note"], notesExportRows(context))}
+</body>
+</html>`;
   }
 
-  function paginatePdfLines(lines) {
-    const wrapped = lines.flatMap((line) => wrapPdfLine(line, 95));
-    const pages = [];
-    for (let index = 0; index < wrapped.length; index += 45) {
-      pages.push(wrapped.slice(index, index + 45));
-    }
-    return pages.length ? pages : [["No data available."]];
-  }
-
-  function wrapPdfLine(line, maxLength) {
-    const value = String(line || "");
-    if (value.length <= maxLength) {
-      return [value];
-    }
-
-    const chunks = [];
-    let remaining = value;
-    while (remaining.length > maxLength) {
-      chunks.push(remaining.slice(0, maxLength));
-      remaining = `  ${remaining.slice(maxLength)}`;
-    }
-    chunks.push(remaining);
-    return chunks;
-  }
-
-  function pdfStreamForLines(lines) {
-    const commands = ["BT", "/F1 10 Tf", "50 750 Td", "14 TL"];
-    for (const line of lines) {
-      commands.push(`(${escapePdfText(line)}) Tj`, "T*");
-    }
-    commands.push("ET");
-    const stream = commands.join("\n");
-    return `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
-  }
-
-  function serializePdf(objects) {
-    let pdf = "%PDF-1.4\n";
-    const offsets = [0];
-    for (let index = 0; index < objects.length; index += 1) {
-      offsets.push(pdf.length);
-      pdf += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`;
-    }
-
-    const xrefOffset = pdf.length;
-    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-    for (const offset of offsets.slice(1)) {
-      pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-    }
-    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-    return pdf;
-  }
-
-  function escapePdfText(value) {
-    return String(value == null ? "" : value)
-      .replace(/\\/g, "\\\\")
-      .replace(/\(/g, "\\(")
-      .replace(/\)/g, "\\)")
-      .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "?");
+  function exportTable(titleText, headers, rows) {
+    const headerHtml = headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("");
+    const bodyHtml = rows.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(exportValue(value))}</td>`).join("")}</tr>`).join("");
+    return `<h2>${escapeHtml(titleText)}</h2><table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
   }
 
   function exportValue(value) {
@@ -477,7 +415,7 @@
   }
 
   function downloadFile(content, mimeType, fileName) {
-    const blob = new Blob([content], { type: mimeType });
+    const blob = new Blob(["\ufeff", content], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -487,6 +425,15 @@
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function sectionIntro(text) {
@@ -777,6 +724,7 @@
 
       .sf2p-intro,
       .sf2p-card,
+      .sf2p-url-card,
       .sf2p-table-section,
       .sf2p-summary,
       .sf2p-notes-toggle,
@@ -810,6 +758,13 @@
         font-size: 18px;
         font-weight: 750;
         margin-top: 4px;
+        overflow-wrap: anywhere;
+      }
+
+      .sf2p-url-value {
+        color: #181818;
+        font-size: 12px;
+        margin-top: 5px;
         overflow-wrap: anywhere;
       }
 
