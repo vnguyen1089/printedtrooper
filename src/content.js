@@ -579,16 +579,22 @@
     }
 
     const detail = event.data || {};
-    if (!detail || detail.source !== "sf2p" || detail.type !== "api-request" || !detail.requestId || !detail.path) {
+    if (!detail || detail.source !== "sf2p" || !detail.requestId) {
       return;
     }
 
     try {
-      const response = await sendMessage({
-        type: "SF2P_API_FETCH",
-        path: detail.path,
-        currentUrl: window.location.href
-      });
+      const response = detail.type === "soap-user-info"
+        ? await sendMessage({
+          type: "SF2P_SOAP_USER_INFO",
+          apiVersion: detail.apiVersion,
+          currentUrl: window.location.href
+        })
+        : await sendMessage({
+          type: "SF2P_API_FETCH",
+          path: detail.path,
+          currentUrl: window.location.href
+        });
       dispatchApiResponse(detail.requestId, response || { ok: false, error: "No API response returned." });
     } catch (error) {
       dispatchApiResponse(detail.requestId, { ok: false, error: error.message || String(error) });

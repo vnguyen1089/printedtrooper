@@ -44,6 +44,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "SF2P_SOAP_USER_INFO") {
+    soapUserInfoFromExtension(message.currentUrl || sender.tab && sender.tab.url, message.apiVersion)
+      .then((body) => sendResponse({ ok: true, body }))
+      .catch((error) => {
+        console.error("Salesforce Perspectives SOAP user info proxy failed.", error);
+        sendResponse({ ok: false, error: error.message || String(error) });
+      });
+    return true;
+  }
+
   if (message.type !== "SF2P_COLLECT_CONTEXT") {
     return false;
   }
@@ -151,6 +161,99 @@ async function apiFetchFromExtension(currentUrl, path) {
   }
 
   throw new Error(errors.join("; ") || "Salesforce API proxy could not reach an API host.");
+}
+
+async function soapUserInfoFromExtension(currentUrl, apiVersion) {
+  const path = `/services/Soap/u/${encodeURIComponent(apiVersion || "60.0")}`;
+  const urls = salesforceApiUrlsFromUrl(currentUrl, path);
+  const sessionIds = await getSessionIdsForUrls([currentUrl, ...urls]);
+  const errors = [];
+
+  for (const url of urls) {
+    for (const sessionId of sessionIds) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "text/xml; charset=UTF-8",
+            "SOAPAction": "\"\""
+          },
+          body: soapUserInfoEnvelope(sessionId)
+        });
+        const text = await response.text();
+
+        if (response.ok) {
+          const parsed = parseSoapUserInfo(text);
+          if (parsed && parsed.id) {
+            return parsed;
+          }
+          errors.push(`${displayExtensionApiUrl(url)} SOAP response did not include a user id.`);
+          continue;
+        }
+
+        errors.push(`${displayExtensionApiUrl(url)} SOAP returned ${response.status}: ${text.slice(0, 300)}`);
+        if (!shouldTryNextExtensionApiUrl(response.status)) {
+          break;
+        }
+      } catch (error) {
+        errors.push(`${displayExtensionApiUrl(url)} SOAP: ${error.message || String(error)}`);
+      }
+    }
+  }
+
+  throw new Error(errors.join("; ") || "Salesforce SOAP user info proxy could not use a Salesforce session.");
+}
+
+function soapUserInfoEnvelope(sessionId) {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/">
+  <env:Header>
+    <SessionHeader xmlns="urn:partner.soap.sforce.com">
+      <sessionId>${escapeXml(sessionId)}</sessionId>
+    </SessionHeader>
+  </env:Header>
+  <env:Body>
+    <getUserInfo xmlns="urn:partner.soap.sforce.com"/>
+  </env:Body>
+</env:Envelope>`;
+}
+
+function parseSoapUserInfo(text) {
+  return {
+    id: soapTag(text, "userId"),
+    name: soapTag(text, "userFullName") || soapTag(text, "userName"),
+    username: soapTag(text, "userName"),
+    profileId: soapTag(text, "profileId"),
+    roleId: soapTag(text, "roleId"),
+    organizationId: soapTag(text, "organizationId"),
+    organizationName: soapTag(text, "organizationName"),
+    userType: soapTag(text, "userType")
+  };
+}
+
+function soapTag(text, tagName) {
+  const pattern = new RegExp(`<[^:>]*:?${tagName}>([\\s\\S]*?)<\\/[^:>]*:?${tagName}>`, "i");
+  const match = String(text || "").match(pattern);
+  return match ? unescapeXml(match[1]) : null;
+}
+
+function escapeXml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function unescapeXml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, "\"")
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&");
 }
 
 async function parseResponseBody(response) {
@@ -332,17 +435,19 @@ async function collectSalesforcePerspectiveInPage() {
     const pageUser = getUserFromPageGlobals();
     const userInfo = await attempt("OAuth user info", () => apiFetch("/services/oauth2/userinfo"));
     const chatterUser = await attempt("Chatter current user", () => apiFetch(`/services/data/v${apiVersion}/chatter/users/me`));
+    const soapUser = await attempt("SOAP getUserInfo", () => soapUserInfo(apiVersion));
     const userId = chatterUser && chatterUser.id
       || userInfo && (userInfo.user_id || userInfo.userId || idFromIdentityUrl(userInfo.sub))
-      || pageUser && pageUser.id;
+      || pageUser && pageUser.id
+      || soapUser && soapUser.id;
 
     if (!userId || !isSalesforceId(userId)) {
       return {
         id: userId || null,
-        name: currentUserName(chatterUser, pageUser, userInfo),
-        profileId: pageUser && pageUser.profileId || null,
+        name: currentUserName(chatterUser, pageUser, userInfo, soapUser),
+        profileId: pageUser && pageUser.profileId || soapUser && soapUser.profileId || null,
         profileName: pageUser && pageUser.profileName || "Unavailable",
-        roleId: pageUser && pageUser.roleId || null,
+        roleId: pageUser && pageUser.roleId || soapUser && soapUser.roleId || null,
         roleName: pageUser && pageUser.roleName || "Unavailable",
         source: "OAuth userinfo; SOQL user lookup unavailable"
       };
@@ -358,31 +463,31 @@ async function collectSalesforcePerspectiveInPage() {
     const record = response && response.records && response.records[0];
 
     if (!response) {
-      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, "Current user id; SOQL user lookup unavailable");
+      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, soapUser, "Current user id; SOQL user lookup unavailable");
     }
 
     if (!record) {
-      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, "Current user id; SOQL user lookup returned no rows");
+      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, soapUser, "Current user id; SOQL user lookup returned no rows");
     }
 
     return {
       id: record.Id,
-      name: record.Name || currentUserName(chatterUser, pageUser, userInfo),
-      profileId: record.ProfileId || pageUser && pageUser.profileId || null,
+      name: record.Name || currentUserName(chatterUser, pageUser, userInfo, soapUser),
+      profileId: record.ProfileId || pageUser && pageUser.profileId || soapUser && soapUser.profileId || null,
       profileName: record.Profile && record.Profile.Name || pageUser && pageUser.profileName || "Unavailable",
-      roleId: record.UserRoleId || pageUser && pageUser.roleId || null,
+      roleId: record.UserRoleId || pageUser && pageUser.roleId || soapUser && soapUser.roleId || null,
       roleName: record.UserRole && record.UserRole.Name || pageUser && pageUser.roleName || "No role assigned",
       source: "REST SOQL User query"
     };
   }
 
-  async function resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, source) {
+  async function resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, chatterUser, soapUser, source) {
     const userRecord = await attempt(
       "REST User sObject lookup",
       () => apiFetch(`/services/data/v${apiVersion}/sobjects/User/${encodeURIComponent(userId)}?fields=Id,Name,ProfileId,UserRoleId`)
     );
-    const profileId = userRecord && userRecord.ProfileId || pageUser && pageUser.profileId || null;
-    const roleId = userRecord && userRecord.UserRoleId || pageUser && pageUser.roleId || null;
+    const profileId = userRecord && userRecord.ProfileId || pageUser && pageUser.profileId || soapUser && soapUser.profileId || null;
+    const roleId = userRecord && userRecord.UserRoleId || pageUser && pageUser.roleId || soapUser && soapUser.roleId || null;
     const profile = profileId
       ? await attempt("REST Profile sObject lookup", () => apiFetch(`/services/data/v${apiVersion}/sobjects/Profile/${encodeURIComponent(profileId)}?fields=Id,Name`))
       : null;
@@ -392,7 +497,7 @@ async function collectSalesforcePerspectiveInPage() {
 
     return {
       id: userRecord && userRecord.Id || userId,
-      name: userRecord && userRecord.Name || currentUserName(chatterUser, pageUser, userInfo),
+      name: userRecord && userRecord.Name || currentUserName(chatterUser, pageUser, userInfo, soapUser),
       profileId,
       profileName: profile && profile.Name || pageUser && pageUser.profileName || (profileId ? profileId : "Unavailable"),
       roleId,
@@ -401,10 +506,11 @@ async function collectSalesforcePerspectiveInPage() {
     };
   }
 
-  function currentUserName(chatterUser, pageUser, userInfo) {
+  function currentUserName(chatterUser, pageUser, userInfo, soapUser) {
     return chatterUser && (chatterUser.name || chatterUser.displayName)
       || pageUser && pageUser.name
       || userInfo && (userInfo.name || userInfo.preferred_username)
+      || soapUser && soapUser.name
       || "Unavailable";
   }
 
@@ -1585,6 +1691,44 @@ async function collectSalesforcePerspectiveInPage() {
         type: "api-request",
         requestId,
         path
+      }, window.location.origin);
+    });
+  }
+
+  function soapUserInfo(apiVersion) {
+    return new Promise((resolve, reject) => {
+      const requestId = `sf2p-soap-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handleResponse);
+        reject(new Error("Timed out waiting for SOAP getUserInfo."));
+      }, 15000);
+
+      function handleResponse(event) {
+        if (event.source !== window) {
+          return;
+        }
+
+        const detail = event.data || {};
+        if (!detail || detail.source !== "sf2p" || detail.type !== "api-response" || detail.requestId !== requestId) {
+          return;
+        }
+
+        clearTimeout(timeout);
+        window.removeEventListener("message", handleResponse);
+        const response = detail.response || {};
+        if (response.ok) {
+          resolve(response.body);
+          return;
+        }
+        reject(new Error(response.error || "SOAP getUserInfo failed."));
+      }
+
+      window.addEventListener("message", handleResponse);
+      window.postMessage({
+        source: "sf2p",
+        type: "soap-user-info",
+        requestId,
+        apiVersion
       }, window.location.origin);
     });
   }
