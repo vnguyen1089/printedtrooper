@@ -1063,6 +1063,29 @@ async function collectSalesforcePerspectiveInPage() {
     return score;
   }
 
+  function flexiPageCandidateMatchesObject(candidate, objectApiName) {
+    if (!objectApiName) {
+      return true;
+    }
+
+    const haystack = normalizeFlexiPageName([
+      candidate && candidate.apiName,
+      candidate && candidate.developerName,
+      candidate && candidate.name
+    ].filter(Boolean).join(" "));
+    const objectNames = unique([
+      objectApiName,
+      objectApiName.replace(/__c$/i, ""),
+      objectApiName.replace(/__x$/i, "")
+    ]).map((value) => normalizeFlexiPageName(value)).filter(Boolean);
+
+    return objectNames.some((objectName) => haystack.includes(objectName));
+  }
+
+  function normalizeFlexiPageName(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
   function lightningRecordPageFromLoadedMetadata(parsedPage, recordType) {
     const text = loadedMetadataText();
     if (!text) {
@@ -1080,14 +1103,21 @@ async function collectSalesforcePerspectiveInPage() {
       return null;
     }
 
-    const candidates = names.map((name) => ({
-      id: null,
-      name: name.replace(/_/g, " "),
-      apiName: name,
-      developerName: name,
-      namespacePrefix: null,
-      source: "Loaded Lightning metadata scan"
-    }));
+    const candidates = names
+      .map((name) => ({
+        id: null,
+        name: name.replace(/_/g, " "),
+        apiName: name,
+        developerName: name,
+        namespacePrefix: null,
+        source: "Loaded Lightning metadata scan"
+      }))
+      .filter((candidate) => flexiPageCandidateMatchesObject(candidate, parsedPage.objectApiName));
+
+    if (!candidates.length) {
+      return null;
+    }
+
     return chooseBestFlexiPageCandidate(candidates, parsedPage, recordType);
   }
 
