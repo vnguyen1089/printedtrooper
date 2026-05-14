@@ -329,18 +329,19 @@ async function collectSalesforcePerspectiveInPage() {
   }
 
   async function getCurrentUser(apiVersion) {
-    const pageUserId = getUserIdFromPageGlobals();
+    const pageUser = getUserFromPageGlobals();
+    const pageUserId = pageUser && pageUser.id;
     const userInfo = await attempt("OAuth user info", () => apiFetch("/services/oauth2/userinfo"));
     const userId = pageUserId || userInfo && (userInfo.user_id || userInfo.userId || idFromIdentityUrl(userInfo.sub));
 
     if (!userId || !isSalesforceId(userId)) {
       return {
         id: userId || null,
-        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
-        profileId: null,
-        profileName: "Unavailable",
-        roleId: null,
-        roleName: "Unavailable",
+        name: pageUser && pageUser.name || userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
+        profileId: pageUser && pageUser.profileId || null,
+        profileName: pageUser && pageUser.profileName || "Unavailable",
+        roleId: pageUser && pageUser.roleId || null,
+        roleName: pageUser && pageUser.roleName || "Unavailable",
         source: "OAuth userinfo; SOQL user lookup unavailable"
       };
     }
@@ -355,37 +356,46 @@ async function collectSalesforcePerspectiveInPage() {
     const record = response && response.records && response.records[0];
 
     if (!response) {
-      return {
-        id: userId,
-        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
-        profileId: null,
-        profileName: "Unavailable",
-        roleId: null,
-        roleName: "Unavailable",
-        source: "Current user id; SOQL user lookup unavailable"
-      };
+      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, "Current user id; SOQL user lookup unavailable");
     }
 
     if (!record) {
-      return {
-        id: userId,
-        name: userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
-        profileId: null,
-        profileName: "Unavailable",
-        roleId: null,
-        roleName: "Unavailable",
-        source: "Current user id; SOQL user lookup returned no rows"
-      };
+      return resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, "Current user id; SOQL user lookup returned no rows");
     }
 
     return {
       id: record.Id,
-      name: record.Name,
-      profileId: record.ProfileId || null,
-      profileName: record.Profile && record.Profile.Name || "Unavailable",
-      roleId: record.UserRoleId || null,
-      roleName: record.UserRole && record.UserRole.Name || "No role assigned",
+      name: record.Name || pageUser && pageUser.name || userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
+      profileId: record.ProfileId || pageUser && pageUser.profileId || null,
+      profileName: record.Profile && record.Profile.Name || pageUser && pageUser.profileName || "Unavailable",
+      roleId: record.UserRoleId || pageUser && pageUser.roleId || null,
+      roleName: record.UserRole && record.UserRole.Name || pageUser && pageUser.roleName || "No role assigned",
       source: "REST SOQL User query"
+    };
+  }
+
+  async function resolveUserWithoutSoql(apiVersion, userId, pageUser, userInfo, source) {
+    const userRecord = await attempt(
+      "REST User sObject lookup",
+      () => apiFetch(`/services/data/v${apiVersion}/sobjects/User/${encodeURIComponent(userId)}?fields=Id,Name,ProfileId,UserRoleId`)
+    );
+    const profileId = userRecord && userRecord.ProfileId || pageUser && pageUser.profileId || null;
+    const roleId = userRecord && userRecord.UserRoleId || pageUser && pageUser.roleId || null;
+    const profile = profileId
+      ? await attempt("REST Profile sObject lookup", () => apiFetch(`/services/data/v${apiVersion}/sobjects/Profile/${encodeURIComponent(profileId)}?fields=Id,Name`))
+      : null;
+    const role = roleId
+      ? await attempt("REST UserRole sObject lookup", () => apiFetch(`/services/data/v${apiVersion}/sobjects/UserRole/${encodeURIComponent(roleId)}?fields=Id,Name`))
+      : null;
+
+    return {
+      id: userRecord && userRecord.Id || userId,
+      name: userRecord && userRecord.Name || pageUser && pageUser.name || userInfo && (userInfo.name || userInfo.preferred_username) || "Unavailable",
+      profileId,
+      profileName: profile && profile.Name || pageUser && pageUser.profileName || (profileId ? profileId : "Unavailable"),
+      roleId,
+      roleName: role && role.Name || pageUser && pageUser.roleName || (roleId ? roleId : "Unavailable"),
+      source
     };
   }
 
@@ -1061,26 +1071,56 @@ async function collectSalesforcePerspectiveInPage() {
     }
   }
 
-  function getUserIdFromPageGlobals() {
-    const candidates = [];
+  function getUserFromPageGlobals() {
+    const user = {
+      id: null,
+      name: null,
+      profileId: null,
+      profileName: null,
+      roleId: null,
+      roleName: null
+    };
 
     try {
       if (window.$A && typeof window.$A.get === "function") {
-        candidates.push(window.$A.get("$SObjectType.CurrentUser.Id"));
+        user.id = user.id || window.$A.get("$SObjectType.CurrentUser.Id");
+        user.name = user.name || window.$A.get("$SObjectType.CurrentUser.Name");
+        user.profileId = user.profileId || window.$A.get("$SObjectType.CurrentUser.ProfileId");
+        user.roleId = user.roleId || window.$A.get("$SObjectType.CurrentUser.UserRoleId");
       }
     } catch (_error) {
       // Ignore framework access errors from partially loaded Lightning pages.
     }
 
     try {
-      candidates.push(window.UserContext && window.UserContext.userId);
-      candidates.push(window.SfdcApp && window.SfdcApp.userId);
-      candidates.push(window.sfdcPage && window.sfdcPage.userId);
+      const contexts = [
+        window.UserContext,
+        window.SfdcApp,
+        window.sfdcPage,
+        window.Sfdc,
+        window.$User
+      ];
+
+      for (const context of contexts) {
+        if (!context || typeof context !== "object") {
+          continue;
+        }
+        user.id = user.id || context.userId || context.id || context.user_id;
+        user.name = user.name || context.userName || context.name || context.username;
+        user.profileId = user.profileId || context.profileId || context.userProfileId;
+        user.profileName = user.profileName || context.profileName || context.userProfileName;
+        user.roleId = user.roleId || context.roleId || context.userRoleId;
+        user.roleName = user.roleName || context.roleName || context.userRoleName;
+      }
     } catch (_error) {
       // Ignore page-global access errors.
     }
 
-    return candidates.find((candidate) => isSalesforceId(candidate)) || null;
+    user.id = isSalesforceId(user.id) ? user.id : null;
+    user.profileId = isSalesforceId(user.profileId) ? user.profileId : null;
+    user.roleId = isSalesforceId(user.roleId) ? user.roleId : null;
+
+    return Object.values(user).some(Boolean) ? user : null;
   }
 
   function appNameFromDom() {
@@ -1109,7 +1149,7 @@ async function collectSalesforcePerspectiveInPage() {
       }
     }
 
-    return appNameNearLauncher();
+    return appNameNearLauncher() || appNameFromRenderedHeaderText();
   }
 
   function appNameFromElement(element) {
@@ -1206,6 +1246,28 @@ async function collectSalesforcePerspectiveInPage() {
     return null;
   }
 
+  function appNameFromRenderedHeaderText() {
+    const text = document.body && document.body.innerText || "";
+    const lines = text.split(/\r?\n/).map((line) => cleanText(line)).filter(Boolean);
+    const navLabels = new Set(["home", "chatter", "leads", "accounts", "contacts", "opportunities", "cases"]);
+
+    for (let index = 0; index < Math.min(lines.length, 80); index += 1) {
+      const normalized = lines[index].toLowerCase();
+      if (!navLabels.has(normalized)) {
+        continue;
+      }
+
+      for (let candidateIndex = index - 1; candidateIndex >= Math.max(0, index - 6); candidateIndex -= 1) {
+        const candidate = firstLikelyAppNameFromText(lines[candidateIndex]);
+        if (candidate) {
+          return candidate;
+        }
+      }
+    }
+
+    return null;
+  }
+
   function appNameFromElementChain(element) {
     let current = element;
     while (current && current !== document.body) {
@@ -1290,7 +1352,9 @@ async function collectSalesforcePerspectiveInPage() {
       "campaigns",
       "dashboards",
       "reports",
-      "chatter"
+      "chatter",
+      "setup",
+      "salesforce"
     ]);
 
     return text.length <= 60 && !ignored.has(normalized);
