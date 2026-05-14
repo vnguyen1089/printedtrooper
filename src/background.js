@@ -663,11 +663,12 @@ async function collectSalesforcePerspectiveInPage() {
 
   async function resolveAppLightningRecordPage(apiVersion, parsedPage, user, recordType, app) {
     const appNames = unique([
+      app && app.name,
       app && app.apiName,
       app && app.durableId,
       app && app.developerName,
       parsedPage.appKey
-    ].filter(Boolean).flatMap((name) => [name, String(name).replace(/^standard__/, "")]));
+    ].filter(Boolean).flatMap((name) => appNameVariants(name)));
     const safeAppNames = appNames.filter((name) => /^[A-Za-z][A-Za-z0-9_]*(__[A-Za-z][A-Za-z0-9_]*)?$/.test(name));
 
     if (!safeAppNames.length) {
@@ -862,6 +863,18 @@ async function collectSalesforcePerspectiveInPage() {
       namespacePrefix: record.NamespacePrefix || null,
       source
     };
+  }
+
+  function appNameVariants(name) {
+    const value = String(name || "").trim();
+    const withoutStandardPrefix = value.replace(/^standard__/, "");
+    const underscored = withoutStandardPrefix.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    return unique([
+      value,
+      withoutStandardPrefix,
+      underscored,
+      underscored && `standard__${underscored}`
+    ]);
   }
 
   function chooseBestFlexiPageCandidate(candidates, parsedPage, recordType) {
