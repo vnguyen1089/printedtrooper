@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Salesforce Perspectives",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "Shows Salesforce profile, role, app, layout, Lightning record page, and permission set context.",
   "permissions": [
     "activeTab",

@@ -1237,14 +1237,7 @@ async function collectSalesforcePerspectiveInPage() {
       "one-app-nav-bar .slds-context-bar__app-name .slds-truncate",
       "one-app-nav-bar .slds-context-bar__app-name",
       "one-appnav .slds-context-bar__app-name .slds-truncate",
-      "one-appnav .slds-context-bar__app-name",
-      ".slds-context-bar__primary .slds-context-bar__label-action .slds-truncate",
-      ".slds-context-bar__primary .slds-context-bar__label-action",
-      "one-app-nav-bar-item-root a[href*='/lightning/app/'] .slds-truncate",
-      "one-app-nav-bar-item-root a[href*='/lightning/app/']",
-      "one-app-nav-bar a[href*='/lightning/app/'] .slds-truncate",
-      "one-app-nav-bar a[href*='/lightning/app/']",
-      "a.slds-context-bar__label-action[href*='/lightning/app/']"
+      "one-appnav .slds-context-bar__app-name"
     ];
 
     for (const selector of selectors) {
@@ -1469,7 +1462,9 @@ async function collectSalesforcePerspectiveInPage() {
       "reports",
       "chatter",
       "setup",
-      "salesforce"
+      "salesforce",
+      "dashboard list",
+      "dashboards list"
     ]);
 
     return text.length <= 60 && !ignored.has(normalized);
