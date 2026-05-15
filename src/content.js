@@ -7,6 +7,35 @@
   window.__salesforce2PerspectiveLoaded = true;
 
   const PANEL_ID = "salesforce-2-perspective-panel";
+  const SFP_ICON_DATA_URL = `data:image/svg+xml,${encodeURIComponent(`
+    <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+      <defs>
+        <linearGradient id="bg" x1="20" y1="8" x2="108" y2="120" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#2e8cff"/>
+          <stop offset="0.45" stop-color="#071d58"/>
+          <stop offset="1" stop-color="#0bd5ff"/>
+        </linearGradient>
+        <radialGradient id="iris" cx="50%" cy="45%" r="52%">
+          <stop offset="0" stop-color="#e8fbff"/>
+          <stop offset="0.25" stop-color="#39d8ff"/>
+          <stop offset="0.55" stop-color="#0071ff"/>
+          <stop offset="1" stop-color="#00174f"/>
+        </radialGradient>
+        <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+        </filter>
+      </defs>
+      <rect x="3" y="3" width="122" height="122" rx="22" fill="url(#bg)" stroke="#87d8ff" stroke-width="3"/>
+      <rect x="9" y="9" width="110" height="110" rx="18" fill="none" stroke="#001542" stroke-opacity="0.55" stroke-width="2"/>
+      <g filter="url(#shadow)">
+        <path d="M18 52c14-18 29-27 46-27s32 9 46 27c-14 18-29 27-46 27S32 70 18 52Z" fill="#f8fcff" stroke="#00113f" stroke-width="4"/>
+        <circle cx="64" cy="52" r="20" fill="url(#iris)" stroke="#00113f" stroke-width="4"/>
+        <circle cx="64" cy="52" r="8" fill="#020718"/>
+        <circle cx="56" cy="43" r="5" fill="#fff" opacity="0.9"/>
+      </g>
+      <text x="64" y="104" text-anchor="middle" font-family="Arial Black, Arial, sans-serif" font-size="31" font-weight="900" fill="#d7e8ff" stroke="#00113f" stroke-width="3" paint-order="stroke">SFP</text>
+    </svg>
+  `)}`;
   let panelHost = null;
   let shadowRoot = null;
   let isOpen = false;
@@ -56,10 +85,11 @@
     const brand = document.createElement("div");
     brand.className = "sf2p-brand";
 
-    const brandIcon = document.createElement("div");
+    const brandIcon = document.createElement("img");
     brandIcon.className = "sf2p-brand-icon";
+    brandIcon.src = SFP_ICON_DATA_URL;
+    brandIcon.alt = "SFP";
     brandIcon.setAttribute("aria-hidden", "true");
-    brandIcon.textContent = "SFP";
 
     const titleGroup = document.createElement("div");
     const eyebrow = document.createElement("div");
@@ -666,21 +696,12 @@
       }
 
       .sf2p-brand-icon {
-        align-items: center;
-        background: #fff;
-        border: 2px solid rgba(255, 255, 255, 0.85);
-        border-radius: 12px;
+        border-radius: 10px;
         box-shadow: 0 2px 6px rgba(3, 45, 96, 0.22);
-        color: #0176d3;
-        display: flex;
         flex: 0 0 auto;
-        font-size: 12px;
-        font-weight: 900;
-        height: 38px;
-        justify-content: center;
-        letter-spacing: -0.03em;
-        line-height: 1;
-        width: 38px;
+        height: 42px;
+        object-fit: cover;
+        width: 42px;
       }
 
       .sf2p-eyebrow {
