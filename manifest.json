@@ -1,15 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "Salesforce 2 Perspective",
-  "version": "1.0.0",
-  "description": "Shows the Salesforce record type, profile, app, role, and page layout for the current page.",
+  "name": "Salesforce Perspectives",
+  "version": "1.3.1",
+  "description": "Shows Salesforce profile, role, app, layout, Lightning record page, and permission set context.",
   "permissions": [
     "activeTab",
+    "cookies",
     "scripting",
     "tabs"
   ],
   "host_permissions": [
     "https://*.salesforce.com/*",
+    "https://*.my.salesforce.com/*",
     "https://*.force.com/*",
     "https://*.lightning.force.com/*",
     "https://*.visualforce.com/*",
@@ -17,7 +19,7 @@
     "https://*.my.site.com/*"
   ],
   "action": {
-    "default_title": "Salesforce 2 Perspective"
+    "default_title": "Salesforce Perspectives"
   },
   "background": {
     "service_worker": "src/background.js",
@@ -27,6 +29,7 @@
     {
       "matches": [
         "https://*.salesforce.com/*",
+        "https://*.my.salesforce.com/*",
         "https://*.force.com/*",
         "https://*.lightning.force.com/*",
         "https://*.visualforce.com/*",
