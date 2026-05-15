@@ -33,3 +33,7 @@ Salesforce API calls are executed through `chrome.scripting.executeScript` with 
 - Lightning record page detection reads FlexiPage assignment metadata when Tooling API metadata is available, then falls back to FlexiPage candidates for the current object.
 - Permission sets are listed from `PermissionSetAssignment`, excluding profile-owned permission sets.
 - If your Salesforce permissions block a metadata endpoint, the panel still displays the values it can read and lists the blocked endpoint under **Notes**.
+
+## Privacy
+
+The privacy statement is available in `docs/privacy-policy.pdf`.

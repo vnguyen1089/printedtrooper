@@ -1,0 +1,167 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 1999 >>
+stream
+BT
+/F1 10 Tf
+50 750 Td
+14 TL
+(Salesforce Perspectives Privacy Statement) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Effective date: May 15, 2026) Tj
+T*
+() Tj
+T*
+(Salesforce Perspectives is a Chrome extension that helps signed-in Salesforce users view) Tj
+T*
+(Salesforce page context in an organized format.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Data handling) Tj
+T*
+() Tj
+T*
+(Salesforce Perspectives does not collect, sell, rent, share, transmit, or store personal) Tj
+T*
+(data or Salesforce data on any external server.) Tj
+T*
+() Tj
+T*
+(The extension only displays information that is already accessible to the signed-in) Tj
+T*
+(Salesforce user in their Salesforce organization. This includes Salesforce context such as) Tj
+T*
+(record type, profile, role, app name, page layout, Lightning record page, permission sets,) Tj
+T*
+(record identifiers, and page URL.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(How the extension uses data) Tj
+T*
+() Tj
+T*
+(The extension reads Salesforce page and metadata information only when the user opens or) Tj
+T*
+(refreshes the extension panel on a Salesforce page. The information is shown locally in the) Tj
+T*
+(browser to help organize and summarize what the user can already access in Salesforce.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Local exports) Tj
+T*
+() Tj
+T*
+(If the user clicks **Save As**, Salesforce Perspectives generates a Word-compatible document) Tj
+T*
+(locally in the browser. The exported file is downloaded directly to the user's computer. The) Tj
+T*
+(extension does not upload, transmit, or retain the exported document.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Authentication and cookies) Tj
+T*
+() Tj
+T*
+(Salesforce Perspectives may use the user's existing Salesforce browser session to call) Tj
+T*
+(Salesforce APIs for the current Salesforce organization. This is used only to retrieve and) Tj
+T*
+(display Salesforce context in the extension panel. Session cookies are not stored by the) Tj
+T*
+(extension, sent to the developer, or shared with third parties.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Third parties) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 617 >>
+stream
+BT
+/F1 10 Tf
+50 750 Td
+14 TL
+(Salesforce Perspectives does not send data to third-party analytics, advertising, tracking,) Tj
+T*
+(or external processing services.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Remote code) Tj
+T*
+() Tj
+T*
+(Salesforce Perspectives does not load or execute remote JavaScript or WebAssembly. All) Tj
+T*
+(executable extension code is included in the extension package.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Contact) Tj
+T*
+() Tj
+T*
+(For privacy questions about Salesforce Perspectives, contact the extension owner through the) Tj
+T*
+(Chrome Web Store listing or the repository where the extension is distributed.) Tj
+T*
+ET
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000317 00000 n 
+0000002368 00000 n 
+0000002494 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+3162
+%%EOF
