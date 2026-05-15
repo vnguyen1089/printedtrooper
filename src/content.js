@@ -53,6 +53,14 @@
     const header = document.createElement("header");
     header.className = "sf2p-header";
 
+    const brand = document.createElement("div");
+    brand.className = "sf2p-brand";
+
+    const brandIcon = document.createElement("div");
+    brandIcon.className = "sf2p-brand-icon";
+    brandIcon.setAttribute("aria-hidden", "true");
+    brandIcon.textContent = "SFP";
+
     const titleGroup = document.createElement("div");
     const eyebrow = document.createElement("div");
     eyebrow.className = "sf2p-eyebrow";
@@ -60,6 +68,7 @@
     const title = document.createElement("h1");
     title.textContent = "Perspectives";
     titleGroup.append(eyebrow, title);
+    brand.append(brandIcon, titleGroup);
 
     const actions = document.createElement("div");
     actions.className = "sf2p-actions";
@@ -72,7 +81,7 @@
       panelHost.dataset.open = "false";
     });
     actions.append(saveAs, refresh, close);
-    header.append(titleGroup, actions);
+    header.append(brand, actions);
 
     const body = document.createElement("main");
     body.className = "sf2p-body";
@@ -644,8 +653,34 @@
         background: linear-gradient(135deg, #0176d3, #032d60);
         color: #fff;
         display: flex;
+        gap: 12px;
         justify-content: space-between;
         padding: 18px;
+      }
+
+      .sf2p-brand {
+        align-items: center;
+        display: flex;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .sf2p-brand-icon {
+        align-items: center;
+        background: #fff;
+        border: 2px solid rgba(255, 255, 255, 0.85);
+        border-radius: 12px;
+        box-shadow: 0 2px 6px rgba(3, 45, 96, 0.22);
+        color: #0176d3;
+        display: flex;
+        flex: 0 0 auto;
+        font-size: 12px;
+        font-weight: 900;
+        height: 38px;
+        justify-content: center;
+        letter-spacing: -0.03em;
+        line-height: 1;
+        width: 38px;
       }
 
       .sf2p-eyebrow {
