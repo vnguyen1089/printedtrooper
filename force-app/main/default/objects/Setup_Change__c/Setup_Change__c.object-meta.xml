@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <description>Imported Salesforce Setup Audit Trail entries for reporting, retention, and alerting.</description>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <label>Setup Change</label>
+    <nameField>
+        <displayFormat>SC-{000000}</displayFormat>
+        <label>Setup Change Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Setup Changes</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+</CustomObject>
