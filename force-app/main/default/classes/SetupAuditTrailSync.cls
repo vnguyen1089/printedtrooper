@@ -58,10 +58,28 @@ public without sharing class SetupAuditTrailSync implements Schedulable {
             ORDER BY CreatedDate ASC
             LIMIT 10000
         ]) {
-            entries.add(AuditEntry.fromSetupAuditTrail(auditRow));
+            entries.add(toAuditEntry(auditRow));
         }
 
         return entries;
+    }
+
+    private static AuditEntry toAuditEntry(SetupAuditTrail auditRow) {
+        AuditEntry entry = new AuditEntry();
+        entry.action = auditRow.Action;
+        entry.auditTrailId = auditRow.Id;
+        entry.auditCreatedDate = auditRow.CreatedDate;
+        entry.createdByEmail = auditRow.CreatedBy == null ? null : auditRow.CreatedBy.Email;
+        entry.createdById = auditRow.CreatedById;
+        entry.createdByName = auditRow.CreatedBy == null ? null : auditRow.CreatedBy.Name;
+        entry.createdByProfileName = auditRow.CreatedBy == null || auditRow.CreatedBy.Profile == null
+            ? null
+            : auditRow.CreatedBy.Profile.Name;
+        entry.delegateUser = auditRow.DelegateUser;
+        entry.display = auditRow.Display;
+        entry.responsibleNamespacePrefix = auditRow.ResponsibleNamespacePrefix;
+        entry.section = auditRow.Section;
+        return entry;
     }
 
     @TestVisible
@@ -162,24 +180,6 @@ public without sharing class SetupAuditTrailSync implements Schedulable {
         public String display;
         public String responsibleNamespacePrefix;
         public String section;
-
-        public static AuditEntry fromSetupAuditTrail(SetupAuditTrail auditRow) {
-            AuditEntry entry = new AuditEntry();
-            entry.action = auditRow.Action;
-            entry.auditTrailId = auditRow.Id;
-            entry.auditCreatedDate = auditRow.CreatedDate;
-            entry.createdByEmail = auditRow.CreatedBy == null ? null : auditRow.CreatedBy.Email;
-            entry.createdById = auditRow.CreatedById;
-            entry.createdByName = auditRow.CreatedBy == null ? null : auditRow.CreatedBy.Name;
-            entry.createdByProfileName = auditRow.CreatedBy == null || auditRow.CreatedBy.Profile == null
-                ? null
-                : auditRow.CreatedBy.Profile.Name;
-            entry.delegateUser = auditRow.DelegateUser;
-            entry.display = auditRow.Display;
-            entry.responsibleNamespacePrefix = auditRow.ResponsibleNamespacePrefix;
-            entry.section = auditRow.Section;
-            return entry;
-        }
     }
 
     public class SetupAuditTrailSyncException extends Exception {
