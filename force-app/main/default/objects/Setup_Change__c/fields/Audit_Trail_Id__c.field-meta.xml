@@ -6,7 +6,7 @@
     <externalId>true</externalId>
     <label>Audit Trail Id</label>
     <length>18</length>
-    <required>true</required>
+    <required>false</required>
     <trackTrending>false</trackTrending>
     <type>Text</type>
     <unique>true</unique>
