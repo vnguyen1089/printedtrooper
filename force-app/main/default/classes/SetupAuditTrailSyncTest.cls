@@ -99,6 +99,53 @@ private class SetupAuditTrailSyncTest {
         System.assertEquals(255, savedChange.Action__c.length(), 'Text fields should be truncated safely.');
     }
 
+    @IsTest
+    static void toAuditEntryMapsSetupAuditTrailFields() {
+        SetupAuditTrail auditRow = (SetupAuditTrail) JSON.deserialize(
+            '{' +
+                '"attributes":{"type":"SetupAuditTrail"},' +
+                '"Id":"0Ym000000000004AAA",' +
+                '"Action":"Updated Apex Class",' +
+                '"CreatedById":"005000000000001AAA",' +
+                '"CreatedDate":"2026-05-16T19:00:00.000+0000",' +
+                '"CreatedBy":{' +
+                    '"attributes":{"type":"User"},' +
+                    '"Name":"Admin User",' +
+                    '"Email":"admin@example.com",' +
+                    '"Profile":{"attributes":{"type":"Profile"},"Name":"System Administrator"}' +
+                '},' +
+                '"DelegateUser":"Delegated User",' +
+                '"Display":"Updated class SetupAuditTrailSync",' +
+                '"ResponsibleNamespacePrefix":"pkg",' +
+                '"Section":"Apex Classes"' +
+            '}',
+            SetupAuditTrail.class
+        );
+
+        SetupAuditTrailSync.AuditEntry entry = SetupAuditTrailSync.toAuditEntry(auditRow);
+
+        System.assertEquals('0Ym000000000004AAA', entry.auditTrailId);
+        System.assertEquals('Updated Apex Class', entry.action);
+        System.assertEquals('005000000000001AAA', entry.createdById);
+        System.assertEquals('Admin User', entry.createdByName);
+        System.assertEquals('admin@example.com', entry.createdByEmail);
+        System.assertEquals('System Administrator', entry.createdByProfileName);
+        System.assertEquals('Delegated User', entry.delegateUser);
+        System.assertEquals('Updated class SetupAuditTrailSync', entry.display);
+        System.assertEquals('pkg', entry.responsibleNamespacePrefix);
+        System.assertEquals('Apex Classes', entry.section);
+    }
+
+    @IsTest
+    static void syncSinceRequiresStartDate() {
+        try {
+            SetupAuditTrailSync.syncSince(null);
+            System.assert(false, 'syncSince should require a starting date.');
+        } catch (SetupAuditTrailSync.SetupAuditTrailSyncException error) {
+            System.assertEquals('A starting date is required.', error.getMessage());
+        }
+    }
+
     private static SetupAuditTrailSync.AuditEntry buildEntry(String auditTrailId, String action) {
         SetupAuditTrailSync.AuditEntry entry = new SetupAuditTrailSync.AuditEntry();
         entry.action = action;

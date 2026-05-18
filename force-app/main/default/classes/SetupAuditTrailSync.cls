@@ -64,6 +64,7 @@ public without sharing class SetupAuditTrailSync implements Schedulable {
         return entries;
     }
 
+    @TestVisible
     private static AuditEntry toAuditEntry(SetupAuditTrail auditRow) {
         AuditEntry entry = new AuditEntry();
         entry.action = auditRow.Action;
