@@ -3,7 +3,6 @@
     <fullName>Created_By_Email__c</fullName>
     <description>Email of the user recorded on the SetupAuditTrail entry.</description>
     <label>Created By Email</label>
-    <length>255</length>
     <required>false</required>
     <trackTrending>false</trackTrending>
     <type>Email</type>
