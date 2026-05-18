@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ListView xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Recent_Setup_Changes</fullName>
+    <columns>NAME</columns>
+    <columns>Audit_Created_Date__c</columns>
+    <columns>Action__c</columns>
+    <columns>Section__c</columns>
+    <columns>Created_By_Name__c</columns>
+    <filterScope>Everything</filterScope>
+    <label>Recent Setup Changes</label>
+</ListView>
