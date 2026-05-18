@@ -8,6 +8,4 @@
     <columns>Created_By_Name__c</columns>
     <filterScope>Everything</filterScope>
     <label>Recent Setup Changes</label>
-    <sortColumn>Audit_Created_Date__c</sortColumn>
-    <sortOrder>Descending</sortOrder>
 </ListView>
