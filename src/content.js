@@ -7,6 +7,10 @@
   window.__salesforce2PerspectiveLoaded = true;
 
   const PANEL_ID = "salesforce-2-perspective-panel";
+  const ACCOUNT_HISTORY_ROW_LIMIT = 10;
+  const ACCOUNT_HISTORY_LIMIT_NOTE_CLASS = "sf2p-account-history-limit-note";
+  const ACCOUNT_HISTORY_HIDDEN_ATTR = "data-sf2p-account-history-hidden";
+  const ACCOUNT_HISTORY_OLD_DISPLAY_ATTR = "data-sf2p-account-history-old-display";
   let panelHost = null;
   let shadowRoot = null;
   let isOpen = false;
@@ -19,6 +23,7 @@
   });
 
   window.addEventListener("sf2p:toggle", togglePanel);
+  initializeAccountHistoryRowLimit();
 
   function togglePanel() {
     ensurePanel();
@@ -28,6 +33,242 @@
     if (isOpen) {
       refreshContext();
     }
+  }
+
+  function initializeAccountHistoryRowLimit() {
+    let scheduled = false;
+    const scheduleLimit = () => {
+      if (scheduled) {
+        return;
+      }
+
+      scheduled = true;
+      const schedule = window.requestAnimationFrame || ((callback) => setTimeout(callback, 0));
+      schedule(() => {
+        scheduled = false;
+        applyAccountHistoryRowLimit();
+      });
+    };
+
+    const startObserver = () => {
+      if (!document.body) {
+        return;
+      }
+
+      scheduleLimit();
+      const observer = new MutationObserver(scheduleLimit);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+    };
+
+    if (document.body) {
+      startObserver();
+    } else {
+      document.addEventListener("DOMContentLoaded", startObserver, { once: true });
+    }
+  }
+
+  function applyAccountHistoryRowLimit() {
+    const lists = findAccountHistoryLists();
+
+    cleanupAccountHistoryRowLimit(lists);
+
+    for (const list of lists) {
+      const rows = dataRows(list);
+
+      for (const row of rows) {
+        restoreAccountHistoryRow(row);
+      }
+
+      rows.forEach((row, index) => {
+        if (index >= ACCOUNT_HISTORY_ROW_LIMIT) {
+          hideAccountHistoryRow(row);
+        }
+      });
+
+      updateAccountHistoryLimitNote(list, rows.length);
+    }
+  }
+
+  function cleanupAccountHistoryRowLimit(lists) {
+    const activeLists = new Set(lists);
+
+    for (const row of document.querySelectorAll(`[${ACCOUNT_HISTORY_HIDDEN_ATTR}]`)) {
+      if (!isInsideAnyList(row, activeLists)) {
+        restoreAccountHistoryRow(row);
+      }
+    }
+
+    for (const note of document.querySelectorAll(`.${ACCOUNT_HISTORY_LIMIT_NOTE_CLASS}`)) {
+      const list = Array.from(activeLists).find((activeList) => activeList.parentElement === note.parentElement);
+      if (!list) {
+        note.remove();
+      }
+    }
+  }
+
+  function isInsideAnyList(element, lists) {
+    for (const list of lists) {
+      if (list.contains(element)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function findAccountHistoryLists() {
+    const lists = new Set();
+    const candidates = Array.from(document.querySelectorAll("table, [role='table'], [role='grid']"));
+
+    for (const candidate of candidates) {
+      if (panelHost && panelHost.contains(candidate) || dataRows(candidate).length <= ACCOUNT_HISTORY_ROW_LIMIT) {
+        continue;
+      }
+
+      if (isAccountHistoryList(candidate)) {
+        lists.add(candidate);
+      }
+    }
+
+    return Array.from(lists);
+  }
+
+  function isAccountHistoryList(candidate) {
+    if (hasAccountHistoryText(candidate) || hasAccountHistoryText(accountHistoryScope(candidate))) {
+      return true;
+    }
+
+    const heading = closestPreviousAccountHistoryHeading(candidate);
+    if (!heading) {
+      return false;
+    }
+
+    const scope = accountHistoryScope(heading);
+    return !scope || scope === document.body || scope.contains(candidate) || isNextListAfterHeading(heading, candidate);
+  }
+
+  function accountHistoryScope(element) {
+    return element && element.closest([
+      "force-related-list-single-container",
+      "force-related-list-container",
+      "records-record-layout-section",
+      "lst-list-view-manager",
+      "article",
+      "section",
+      "[role='region']",
+      ".slds-card"
+    ].join(", "));
+  }
+
+  function closestPreviousAccountHistoryHeading(candidate) {
+    const headings = Array.from(document.querySelectorAll([
+      "h1",
+      "h2",
+      "h3",
+      "[title]",
+      "[aria-label]",
+      ".slds-page-header__title",
+      ".slds-card__header-title",
+      ".slds-text-heading_small"
+    ].join(", ")));
+
+    let closest = null;
+    for (const heading of headings) {
+      if (!hasAccountHistoryText(heading) || heading.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_PRECEDING) {
+        continue;
+      }
+
+      closest = heading;
+    }
+
+    return closest;
+  }
+
+  function isNextListAfterHeading(heading, candidate) {
+    const lists = Array.from(document.querySelectorAll("table, [role='table'], [role='grid']"))
+      .filter((list) => dataRows(list).length > 0);
+    return lists.find((list) => heading.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING) === candidate;
+  }
+
+  function hasAccountHistoryText(element) {
+    if (!element) {
+      return false;
+    }
+
+    const values = [
+      element.getAttribute && element.getAttribute("title"),
+      element.getAttribute && element.getAttribute("aria-label"),
+      element.textContent
+    ];
+
+    return values.some((value) => cleanText(value).toLowerCase().includes("account history"));
+  }
+
+  function dataRows(list) {
+    const rows = list.tagName === "TABLE"
+      ? Array.from(list.querySelectorAll("tbody tr"))
+      : Array.from(list.querySelectorAll("[role='row']"));
+
+    return rows.filter((row) => {
+      if (row.closest(`.${ACCOUNT_HISTORY_LIMIT_NOTE_CLASS}`)) {
+        return false;
+      }
+
+      if (row.closest("thead") || row.querySelector("[role='columnheader']")) {
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  function hideAccountHistoryRow(row) {
+    if (!row.hasAttribute(ACCOUNT_HISTORY_HIDDEN_ATTR)) {
+      row.setAttribute(ACCOUNT_HISTORY_OLD_DISPLAY_ATTR, row.style.display || "");
+    }
+
+    row.setAttribute(ACCOUNT_HISTORY_HIDDEN_ATTR, "true");
+    row.style.display = "none";
+  }
+
+  function restoreAccountHistoryRow(row) {
+    if (!row.hasAttribute(ACCOUNT_HISTORY_HIDDEN_ATTR)) {
+      return;
+    }
+
+    row.style.display = row.getAttribute(ACCOUNT_HISTORY_OLD_DISPLAY_ATTR) || "";
+    row.removeAttribute(ACCOUNT_HISTORY_HIDDEN_ATTR);
+    row.removeAttribute(ACCOUNT_HISTORY_OLD_DISPLAY_ATTR);
+  }
+
+  function updateAccountHistoryLimitNote(list, totalRows) {
+    const hiddenRows = Math.max(totalRows - ACCOUNT_HISTORY_ROW_LIMIT, 0);
+    const parent = list.parentElement;
+    if (!parent) {
+      return;
+    }
+
+    let note = parent.querySelector(`:scope > .${ACCOUNT_HISTORY_LIMIT_NOTE_CLASS}`);
+    if (!hiddenRows) {
+      if (note) {
+        note.remove();
+      }
+      return;
+    }
+
+    if (!note) {
+      note = document.createElement("div");
+      note.className = ACCOUNT_HISTORY_LIMIT_NOTE_CLASS;
+      note.style.color = "#706e6b";
+      note.style.fontSize = "12px";
+      note.style.padding = "8px 12px";
+      parent.append(note);
+    }
+
+    note.textContent = `Showing the first ${ACCOUNT_HISTORY_ROW_LIMIT} Account History rows. ${hiddenRows} additional ${hiddenRows === 1 ? "row is" : "rows are"} hidden.`;
   }
 
   function ensurePanel() {
